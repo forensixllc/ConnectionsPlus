@@ -1,33 +1,40 @@
-# ============================================================
-# connections_app.py – Streamlit version
-# ============================================================
-
+# app.py
 import streamlit as st
 import sqlite3
 import pandas as pd
 import os
+import requests
+import tempfile
 
-# ---- Database path (Google Drive) ----
-DB_PATH = '/content/drive/MyDrive/connections.db'
+# ---- Database URL (replace with your own public URL) ----
+DB_URL = "https://your-public-url.com/connections.db"  # <-- CHANGE THIS
+DB_FILE = "connections.db"
 
-# ---- Check file exists ----
-if not os.path.exists(DB_PATH):
-    st.error(f"Database not found at {DB_PATH}. Please mount Drive and place connections.db there.")
-    st.stop()
-
-# ---- Connect to DB ----
+# ---- Download database if not present ----
 @st.cache_resource
-def get_connection():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+def load_database():
+    if not os.path.exists(DB_FILE):
+        st.info("Downloading database (315 MB) – this may take a few minutes...")
+        try:
+            response = requests.get(DB_URL, stream=True)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            with open(DB_FILE, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            st.success("Database downloaded successfully.")
+        except Exception as e:
+            st.error(f"Failed to download database: {e}")
+            st.stop()
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
 
-conn = get_connection()
+conn = load_database()
 
-# ---- Load unique hubs and categories (cached) ----
+# ---- Load options (cached) ----
 @st.cache_data
 def load_options():
     hubs = pd.read_sql_query("SELECT DISTINCT pulte_subdomain FROM connections WHERE pulte_subdomain IS NOT NULL ORDER BY pulte_subdomain LIMIT 500", conn)
     hubs_list = hubs['pulte_subdomain'].tolist()
-    # Get categories from fraud_risk_tags
     tags_df = pd.read_sql_query("SELECT DISTINCT fraud_risk_tags FROM connections WHERE fraud_risk_tags IS NOT NULL", conn)
     tags_set = set()
     for t in tags_df['fraud_risk_tags']:
@@ -57,7 +64,7 @@ with col3:
 
 search_clicked = st.button("🔍 Search", type="primary")
 
-# ---- Perform search ----
+# ---- Search logic ----
 if search_clicked:
     hub = custom_hub.strip() if custom_hub else hub_choice
     category = category_choice
@@ -66,7 +73,6 @@ if search_clicked:
     if not hub and not category and not domain:
         st.warning("Please enter at least one search criterion.")
     else:
-        # Build query
         query = """
             SELECT ip, pulte_subdomain, overlap_subdomain, fraud_risk_tags, cname_evidence, cname_shared
             FROM connections
@@ -90,7 +96,6 @@ if search_clicked:
                 st.info("No results found.")
             else:
                 st.success(f"Found {len(df_result)} rows")
-                # Style: highlight high-risk rows
                 def highlight_risk(row):
                     tags = row['fraud_risk_tags'] or ''
                     if any(k in tags for k in ['Illegal', 'Identity', 'Money', 'Inmate']):
@@ -100,7 +105,7 @@ if search_clicked:
         except Exception as e:
             st.error(f"Query error: {e}")
 
-# ---- Optionally show some stats at bottom ----
+# ---- Stats ----
 if st.checkbox("Show database stats"):
     total = pd.read_sql_query("SELECT COUNT(*) FROM connections", conn).iloc[0,0]
     st.write(f"Total rows: {total}")
