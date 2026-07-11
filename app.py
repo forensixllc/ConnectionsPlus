@@ -1,85 +1,106 @@
-from flask import Flask, request, jsonify, send_from_directory
+# ============================================================
+# connections_app.py – Streamlit version
+# ============================================================
+
+import streamlit as st
 import sqlite3
+import pandas as pd
 import os
 
-app = Flask(__name__, static_folder='static')
-DB_PATH = '/content/connections.db'  # adjust if needed
+# ---- Database path (Google Drive) ----
+DB_PATH = '/content/drive/MyDrive/connections.db'
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ---- Check file exists ----
+if not os.path.exists(DB_PATH):
+    st.error(f"Database not found at {DB_PATH}. Please mount Drive and place connections.db there.")
+    st.stop()
 
-# --- API: list of hubs (unique pulte_subdomain) ---
-@app.route('/api/hubs')
-def hubs():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT DISTINCT pulte_subdomain FROM connections WHERE pulte_subdomain IS NOT NULL ORDER BY pulte_subdomain')
-    rows = cur.fetchall()
-    conn.close()
-    return jsonify([r['pulte_subdomain'] for r in rows])
+# ---- Connect to DB ----
+@st.cache_resource
+def get_connection():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-# --- API: list of risk categories (unique tags) ---
-@app.route('/api/categories')
-def categories():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute('SELECT DISTINCT fraud_risk_tags FROM connections WHERE fraud_risk_tags IS NOT NULL')
-    rows = cur.fetchall()
-    tags = set()
-    for r in rows:
-        for t in r['fraud_risk_tags'].split(', '):
-            tags.add(t)
-    conn.close()
-    return jsonify(sorted(tags))
+conn = get_connection()
 
-# --- API: search ---
-@app.route('/api/search')
-def search():
-    hub = request.args.get('hub')
-    category = request.args.get('category')
-    domain = request.args.get('domain')
+# ---- Load unique hubs and categories (cached) ----
+@st.cache_data
+def load_options():
+    hubs = pd.read_sql_query("SELECT DISTINCT pulte_subdomain FROM connections WHERE pulte_subdomain IS NOT NULL ORDER BY pulte_subdomain LIMIT 500", conn)
+    hubs_list = hubs['pulte_subdomain'].tolist()
+    # Get categories from fraud_risk_tags
+    tags_df = pd.read_sql_query("SELECT DISTINCT fraud_risk_tags FROM connections WHERE fraud_risk_tags IS NOT NULL", conn)
+    tags_set = set()
+    for t in tags_df['fraud_risk_tags']:
+        if t:
+            for tag in t.split(', '):
+                tags_set.add(tag)
+    return hubs_list, sorted(tags_set)
 
-    conn = get_db_connection()
-    cur = conn.cursor()
+hubs_list, categories = load_options()
 
-    # Build query
-    query = "SELECT ip, pulte_subdomain, overlap_subdomain, fraud_risk_tags, cname_evidence, cname_shared FROM connections WHERE 1=1"
-    params = []
+# ---- Streamlit UI ----
+st.set_page_config(page_title="Connections +", layout="wide")
+st.title("🔗 Connections +")
+st.markdown("Find IP + CNAME overlaps between a hub domain and other domains by risk category.")
 
-    if hub:
-        query += " AND pulte_subdomain = ?"
-        params.append(hub)
-    if category:
-        query += " AND fraud_risk_tags LIKE ?"
-        params.append(f'%{category}%')
-    if domain:
-        query += " AND overlap_subdomain LIKE ?"
-        params.append(f'%{domain}%')
+col1, col2, col3 = st.columns(3)
 
-    # Limit results for performance
-    query += " LIMIT 1000"
-    cur.execute(query, params)
-    rows = cur.fetchall()
-    conn.close()
+with col1:
+    hub_choice = st.selectbox("Hub Domain", options=[""] + hubs_list, index=0)
+    custom_hub = st.text_input("Or type custom domain", placeholder="e.g. portal.pulte.com")
 
-    results = []
-    for r in rows:
-        results.append({
-            'ip': r['ip'],
-            'pulte_subdomain': r['pulte_subdomain'],
-            'overlap_subdomain': r['overlap_subdomain'],
-            'fraud_risk_tags': r['fraud_risk_tags'],
-            'cname_evidence': r['cname_evidence'],
-            'cname_shared': r['cname_shared']
-        })
-    return jsonify(results)
+with col2:
+    category_choice = st.selectbox("Risk Category", options=[""] + categories, index=0)
 
-# Serve static HTML (optional)
-@app.route('/')
-def index():
-    return send_from_directory('static', 'index.html')
+with col3:
+    domain_search = st.text_input("Overlap Domain (optional)", placeholder="e.g. relativity.com")
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+search_clicked = st.button("🔍 Search", type="primary")
+
+# ---- Perform search ----
+if search_clicked:
+    hub = custom_hub.strip() if custom_hub else hub_choice
+    category = category_choice
+    domain = domain_search.strip()
+
+    if not hub and not category and not domain:
+        st.warning("Please enter at least one search criterion.")
+    else:
+        # Build query
+        query = """
+            SELECT ip, pulte_subdomain, overlap_subdomain, fraud_risk_tags, cname_evidence, cname_shared
+            FROM connections
+            WHERE 1=1
+        """
+        params = []
+        if hub:
+            query += " AND pulte_subdomain = ?"
+            params.append(hub)
+        if category:
+            query += " AND fraud_risk_tags LIKE ?"
+            params.append(f'%{category}%')
+        if domain:
+            query += " AND overlap_subdomain LIKE ?"
+            params.append(f'%{domain}%')
+        query += " LIMIT 1000"
+
+        try:
+            df_result = pd.read_sql_query(query, conn, params=params)
+            if df_result.empty:
+                st.info("No results found.")
+            else:
+                st.success(f"Found {len(df_result)} rows")
+                # Style: highlight high-risk rows
+                def highlight_risk(row):
+                    tags = row['fraud_risk_tags'] or ''
+                    if any(k in tags for k in ['Illegal', 'Identity', 'Money', 'Inmate']):
+                        return ['background-color: #ffcccc'] * len(row)
+                    return [''] * len(row)
+                st.dataframe(df_result.style.apply(highlight_risk, axis=1), use_container_width=True)
+        except Exception as e:
+            st.error(f"Query error: {e}")
+
+# ---- Optionally show some stats at bottom ----
+if st.checkbox("Show database stats"):
+    total = pd.read_sql_query("SELECT COUNT(*) FROM connections", conn).iloc[0,0]
+    st.write(f"Total rows: {total}")
