@@ -58,14 +58,6 @@ def get_connection():
 
 conn = get_connection()
 
-# --- Load Pulte hubs ---
-@st.cache_data
-def get_pulte_hubs():
-    df = pd.read_sql_query("SELECT DISTINCT `Pulte subdomain` FROM hubs ORDER BY `Pulte subdomain`", conn)
-    return df['Pulte subdomain'].tolist()
-
-pulte_hubs = get_pulte_hubs()
-
 # --- Load fraud flags ---
 @st.cache_data
 def get_fraud_flags():
@@ -84,13 +76,8 @@ col1, col2 = st.columns(2)
 with col1:
     hub_source = st.selectbox("Hub source", ["Pulte.com", "Upload JSON file"], index=0)
     hub = None
-
     if hub_source == "Pulte.com":
-        hub_choice = st.selectbox("Select Pulte subdomain", options=["All"] + pulte_hubs, index=0)
-        if hub_choice == "All":
-            hub = "ALL"
-        else:
-            hub = hub_choice
+        hub = "ALL"  # Signal to query all Pulte subdomains
     else:
         st.info("Upload a c99.nl JSON file (list of subdomains).")
         uploaded_file = st.file_uploader("Upload JSON", type=['json'])
