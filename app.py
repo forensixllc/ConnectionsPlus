@@ -1,5 +1,5 @@
 # ============================================================
-# Pulte + – Streamlit App (Company dropdown, JSON uses all)
+# Pulte + – Streamlit App (Company dropdown, JSON as hub list)
 # ============================================================
 
 import streamlit as st
@@ -49,7 +49,7 @@ st.markdown("""
 
 # --- Title ---
 st.title("🔗 Pulte +")
-st.caption("Search overlaps for all Pulte companies, a specific one, or all domains from a JSON file")
+st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # --- Database connection ---
 @st.cache_resource
@@ -92,7 +92,7 @@ with col1:
     json_subdomains = []
 
     if selection == "Upload JSON file":
-        st.info("Upload a c99.nl JSON file – all subdomains will be used.")
+        st.info("Upload a JSON file – all subdomains will be used as hubs.")
         uploaded_file = st.file_uploader("Upload JSON", type=['json'])
         if uploaded_file is not None:
             try:
@@ -118,7 +118,7 @@ with col1:
                         if 'subdomain' in data:
                             subdomains.append(data['subdomain'])
                 if subdomains:
-                    json_subdomains = list(set(subdomains))  # unique
+                    json_subdomains = list(set(subdomains))
                     st.success(f"Loaded {len(json_subdomains)} subdomains.")
                 else:
                     st.warning("No subdomains found in the JSON file.")
@@ -140,9 +140,8 @@ if st.button("🔍 Search", type="primary"):
         params = []
 
         if selection == "Upload JSON file":
-            # Use all subdomains from JSON as hub list
-            # We'll build a query with IN clauses for both columns
-            # Limit to 500 subdomains to keep query performant
+            # Use all subdomains from JSON as hubs (match both columns)
+            # Limit to 500 to keep query fast
             limit_subs = json_subdomains[:500]
             placeholders = ','.join(['?' for _ in limit_subs])
             query = f"""
@@ -166,7 +165,6 @@ if st.button("🔍 Search", type="primary"):
                 WHERE `Pulte subdomain` IS NOT NULL
             """
             if company is not None:
-                # Filter by company domain suffix
                 query += " AND (`Pulte subdomain` LIKE ? OR `Pulte subdomain` = ?)"
                 params.append('%.' + company)
                 params.append(company)
