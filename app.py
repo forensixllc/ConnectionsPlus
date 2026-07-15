@@ -1,6 +1,5 @@
 # ============================================================
-# Pulte + – Streamlit App
-# Minimal dark theme, two dropdowns, search
+# Pulte + – Streamlit App (supports JSON upload)
 # ============================================================
 
 import streamlit as st
@@ -8,9 +7,10 @@ import sqlite3
 import pandas as pd
 import os
 import requests
+import json
 
-# --- Database setup: download from Dropbox if not present ---
-DB_URL = "https://www.dropbox.com/scl/fi/o5dzs9d5fjljv9ffb2esb/connections.db?rlkey=mn3eykkderzrrcebexilfvzvt&st=5vrtsi6z&dl=1"  # direct download
+# --- Database setup: download if not present ---
+DB_URL = "https://www.dropbox.com/scl/fi/o5dzs9d5fjljv9ffb2esb/connections.db?rlkey=mn3eykkderzrrcebexilfvzvt&st=5vrtsi6z&dl=1"
 DB_PATH = "connections.db"
 
 def download_db():
@@ -43,12 +43,13 @@ st.markdown("""
     .stButton button { background-color: #333333; color: #ffffff; border: 1px solid #555555; }
     .stButton button:hover { background-color: #444444; }
     .stSpinner > div { color: #ffffff; }
+    .stFileUploader label { color: #ffffff; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- Title ---
 st.title("🔗 Pulte +")
-st.caption("Show overlaps where Pulte subdomains share the ultimate Azure CNAME with external domains")
+st.caption("Find overlaps for any domain – show where it appears as either Pulte or overlapping subdomain")
 
 # --- Database connection ---
 @st.cache_resource
@@ -57,12 +58,15 @@ def get_connection():
 
 conn = get_connection()
 
-# --- Load dropdown options (cached) ---
+# --- Load Pulte hubs (for default dropdown) ---
 @st.cache_data
-def get_hubs():
+def get_pulte_hubs():
     df = pd.read_sql_query("SELECT DISTINCT `Pulte subdomain` FROM hubs ORDER BY `Pulte subdomain`", conn)
     return df['Pulte subdomain'].tolist()
 
+pulte_hubs = get_pulte_hubs()
+
+# --- Load fraud flags ---
 @st.cache_data
 def get_fraud_flags():
     df = pd.read_sql_query("SELECT DISTINCT Fraud_Risk_Tags FROM overlaps WHERE Fraud_Risk_Tags IS NOT NULL AND Fraud_Risk_Tags != ''", conn)
@@ -72,40 +76,87 @@ def get_fraud_flags():
             tags.add(tag)
     return sorted(tags)
 
-hubs_list = get_hubs()
 fraud_flags = get_fraud_flags()
 
-# --- Dropdowns ---
+# --- Layout: source dropdown + fraud flag ---
 col1, col2 = st.columns(2)
+
 with col1:
-    hub = st.selectbox("Pulte subdomain", options=hubs_list, index=0)
+    hub_source = st.selectbox("Hub source", ["Pulte.com", "Upload JSON file"], index=0)
+
+    if hub_source == "Pulte.com":
+        hub = st.selectbox("Choose Pulte subdomain", options=pulte_hubs, index=0)
+    else:
+        st.info("Upload a c99.nl JSON file (list of subdomains).")
+        uploaded_file = st.file_uploader("Upload JSON", type=['json'])
+        if uploaded_file is not None:
+            try:
+                data = json.load(uploaded_file)
+                # Extract subdomains from various formats
+                subdomains = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and 'subdomain' in item:
+                            subdomains.append(item['subdomain'])
+                        elif isinstance(item, str):
+                            subdomains.append(item)
+                elif isinstance(data, dict):
+                    for key in ['subdomains', 'data', 'results']:
+                        if key in data and isinstance(data[key], list):
+                            for item in data[key]:
+                                if isinstance(item, dict) and 'subdomain' in item:
+                                    subdomains.append(item['subdomain'])
+                                elif isinstance(item, str):
+                                    subdomains.append(item)
+                            break
+                    else:
+                        if 'subdomain' in data:
+                            subdomains.append(data['subdomain'])
+                if subdomains:
+                    unique_subs = sorted(set(subdomains))
+                    hub = st.selectbox("Choose subdomain from JSON", options=unique_subs, index=0)
+                else:
+                    hub = None
+                    st.warning("No subdomains found in the JSON file.")
+            except Exception as e:
+                st.error(f"Error parsing JSON: {e}")
+                hub = None
+        else:
+            hub = None
+
 with col2:
     fraud = st.selectbox("Fraud flag", options=['All'] + fraud_flags, index=0)
 
 # --- Search button ---
 if st.button("🔍 Search", type="primary"):
-    conn_local = get_connection()  # reuse connection
-    query = """
-        SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
-        FROM overlaps
-        WHERE `Pulte subdomain` = ?
-    """
-    params = [hub]
-    if fraud != 'All':
-        query += " AND Fraud_Risk_Tags LIKE ?"
-        params.append(f'%{fraud}%')
-    query += " LIMIT 1000"
-    try:
-        df_result = pd.read_sql_query(query, conn_local, params=params)
-    except Exception as e:
-        st.error(f"Query error: {e}")
-        st.stop()
-
-    if df_result.empty:
-        st.info("No overlaps found for the selected criteria.")
+    if hub is None:
+        st.warning("Please select a hub subdomain or upload a valid JSON.")
     else:
-        st.success(f"Found {len(df_result)} overlaps")
-        st.dataframe(df_result, use_container_width=True)
+        conn_local = get_connection()
+        # Query overlaps where the selected hub appears either as Pulte subdomain OR as Overlapping subdomain
+        query = """
+            SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
+            FROM overlaps
+            WHERE `Pulte subdomain` = ? OR `Overlapping subdomain` = ?
+        """
+        params = [hub, hub]
+        if fraud != 'All':
+            query += " AND Fraud_Risk_Tags LIKE ?"
+            params.append(f'%{fraud}%')
+        query += " LIMIT 1000"
+        try:
+            df_result = pd.read_sql_query(query, conn_local, params=params)
+        except Exception as e:
+            st.error(f"Query error: {e}")
+            st.stop()
+
+        if df_result.empty:
+            st.info("No overlaps found for the selected domain.")
+        else:
+            st.success(f"Found {len(df_result)} overlaps")
+            # Rename for clarity
+            df_result.rename(columns={'Ultimate_CNAME_Shared': 'Shared CNAME'}, inplace=True)
+            st.dataframe(df_result, use_container_width=True)
 
 # --- Footer ---
 st.caption("Data from Pulte overlap analysis | Built with Streamlit")
