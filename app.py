@@ -1,5 +1,5 @@
 # ============================================================
-# Pulte + – Streamlit App (Company dropdown + JSON upload)
+# Pulte + – Streamlit App (Company dropdown, JSON uses all)
 # ============================================================
 
 import streamlit as st
@@ -49,7 +49,7 @@ st.markdown("""
 
 # --- Title ---
 st.title("🔗 Pulte +")
-st.caption("Search overlaps for all Pulte companies, a specific one, or a domain from a JSON file")
+st.caption("Search overlaps for all Pulte companies, a specific one, or all domains from a JSON file")
 
 # --- Database connection ---
 @st.cache_resource
@@ -70,7 +70,7 @@ def get_fraud_flags():
 
 fraud_flags = get_fraud_flags()
 
-# --- Company list (Pulte) ---
+# --- Company list ---
 PULTE_COMPANIES = [
     "All Pulte Companies",
     "americanwesthomes.com",
@@ -88,11 +88,11 @@ col1, col2 = st.columns(2)
 
 with col1:
     selection = st.selectbox("Choose hub", PULTE_COMPANIES, index=0)
-    hub = None
     company = None
+    json_subdomains = []
 
     if selection == "Upload JSON file":
-        st.info("Upload a c99.nl JSON file (list of subdomains).")
+        st.info("Upload a c99.nl JSON file – all subdomains will be used.")
         uploaded_file = st.file_uploader("Upload JSON", type=['json'])
         if uploaded_file is not None:
             try:
@@ -118,8 +118,8 @@ with col1:
                         if 'subdomain' in data:
                             subdomains.append(data['subdomain'])
                 if subdomains:
-                    unique_subs = sorted(set(subdomains))
-                    hub = st.selectbox("Choose subdomain from JSON", options=unique_subs, index=0)
+                    json_subdomains = list(set(subdomains))  # unique
+                    st.success(f"Loaded {len(json_subdomains)} subdomains.")
                 else:
                     st.warning("No subdomains found in the JSON file.")
             except Exception as e:
@@ -133,19 +133,31 @@ with col2:
 
 # --- Search ---
 if st.button("🔍 Search", type="primary"):
-    if selection == "Upload JSON file" and hub is None:
-        st.warning("Please upload a valid JSON and select a subdomain.")
+    if selection == "Upload JSON file" and not json_subdomains:
+        st.warning("Please upload a valid JSON file with subdomains.")
     else:
         conn_local = get_connection()
-        # Build query
-        if selection == "Upload JSON file" and hub is not None:
-            # Search for the selected subdomain in either column
-            query = """
+        params = []
+
+        if selection == "Upload JSON file":
+            # Use all subdomains from JSON as hub list
+            # We'll build a query with IN clauses for both columns
+            # Limit to 500 subdomains to keep query performant
+            limit_subs = json_subdomains[:500]
+            placeholders = ','.join(['?' for _ in limit_subs])
+            query = f"""
                 SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
                 FROM overlaps
-                WHERE `Pulte subdomain` = ? OR `Overlapping subdomain` = ?
+                WHERE `Pulte subdomain` IN ({placeholders}) OR `Overlapping subdomain` IN ({placeholders})
             """
-            params = [hub, hub]
+            params = limit_subs + limit_subs  # twice because we have two IN clauses
+            if fraud != 'All':
+                query += " AND Fraud_Risk_Tags LIKE ?"
+                params.append(f'%{fraud}%')
+            if show_cname_only:
+                query += " AND Ultimate_CNAME_Shared = 1"
+            query += " LIMIT 1000"
+
         else:
             # Pulte companies (all or specific)
             query = """
@@ -153,22 +165,17 @@ if st.button("🔍 Search", type="primary"):
                 FROM overlaps
                 WHERE `Pulte subdomain` IS NOT NULL
             """
-            params = []
             if company is not None:
                 # Filter by company domain suffix
-                # Need to match subdomains ending with '.company' or exactly 'company'
                 query += " AND (`Pulte subdomain` LIKE ? OR `Pulte subdomain` = ?)"
                 params.append('%.' + company)
                 params.append(company)
-
-        if fraud != 'All':
-            query += " AND Fraud_Risk_Tags LIKE ?"
-            params.append(f'%{fraud}%')
-
-        if show_cname_only:
-            query += " AND Ultimate_CNAME_Shared = 1"
-
-        query += " LIMIT 1000"
+            if fraud != 'All':
+                query += " AND Fraud_Risk_Tags LIKE ?"
+                params.append(f'%{fraud}%')
+            if show_cname_only:
+                query += " AND Ultimate_CNAME_Shared = 1"
+            query += " LIMIT 1000"
 
         try:
             df_result = pd.read_sql_query(query, conn_local, params=params)
@@ -180,7 +187,6 @@ if st.button("🔍 Search", type="primary"):
             st.info("No overlaps found.")
         else:
             st.success(f"Found {len(df_result)} overlaps")
-            # Rename for display
             df_result.rename(columns={'Ultimate_CNAME_Shared': 'Shared CNAME'}, inplace=True)
             st.dataframe(df_result, use_container_width=True)
 
