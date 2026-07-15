@@ -1,5 +1,5 @@
 # ============================================================
-# Pulte + – Streamlit App (Pulte.com hub or JSON upload)
+# Pulte + – Streamlit App (Company dropdown + JSON upload)
 # ============================================================
 
 import streamlit as st
@@ -49,7 +49,7 @@ st.markdown("""
 
 # --- Title ---
 st.title("🔗 Pulte +")
-st.caption("Search overlaps across all Pulte subdomains or a specific domain from a JSON file")
+st.caption("Search overlaps for all Pulte companies, a specific one, or a domain from a JSON file")
 
 # --- Database connection ---
 @st.cache_resource
@@ -70,15 +70,28 @@ def get_fraud_flags():
 
 fraud_flags = get_fraud_flags()
 
+# --- Company list (Pulte) ---
+PULTE_COMPANIES = [
+    "All Pulte Companies",
+    "americanwesthomes.com",
+    "centex.com",
+    "divosta.com",
+    "icgbuilds.com",
+    "pulte.com",
+    "pultegroup.com",
+    "pultemortgage.com",
+    "Upload JSON file"
+]
+
 # --- Layout ---
 col1, col2 = st.columns(2)
 
 with col1:
-    hub_source = st.selectbox("Hub source", ["Pulte.com", "Upload JSON file"], index=0)
+    selection = st.selectbox("Choose hub", PULTE_COMPANIES, index=0)
     hub = None
-    if hub_source == "Pulte.com":
-        hub = "ALL"  # Signal to query all Pulte subdomains
-    else:
+    company = None
+
+    if selection == "Upload JSON file":
         st.info("Upload a c99.nl JSON file (list of subdomains).")
         uploaded_file = st.file_uploader("Upload JSON", type=['json'])
         if uploaded_file is not None:
@@ -111,6 +124,8 @@ with col1:
                     st.warning("No subdomains found in the JSON file.")
             except Exception as e:
                 st.error(f"Error parsing JSON: {e}")
+    else:
+        company = selection if selection != "All Pulte Companies" else None
 
 with col2:
     fraud = st.selectbox("Fraud flag", options=['All'] + fraud_flags, index=0)
@@ -118,41 +133,40 @@ with col2:
 
 # --- Search ---
 if st.button("🔍 Search", type="primary"):
-    if hub_source == "Upload JSON file" and hub is None:
+    if selection == "Upload JSON file" and hub is None:
         st.warning("Please upload a valid JSON and select a subdomain.")
     else:
         conn_local = get_connection()
         # Build query
-        if hub == "ALL":
-            # All Pulte subdomains
-            query = """
-                SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
-                FROM overlaps
-                WHERE `Pulte subdomain` IS NOT NULL
-            """
-            params = []
-        else:
-            # Specific subdomain (either as Pulte or overlap)
+        if selection == "Upload JSON file" and hub is not None:
+            # Search for the selected subdomain in either column
             query = """
                 SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
                 FROM overlaps
                 WHERE `Pulte subdomain` = ? OR `Overlapping subdomain` = ?
             """
             params = [hub, hub]
+        else:
+            # Pulte companies (all or specific)
+            query = """
+                SELECT IP, `Pulte subdomain`, `Overlapping subdomain`, Fraud_Risk_Tags, Ultimate_CNAME_Shared
+                FROM overlaps
+                WHERE `Pulte subdomain` IS NOT NULL
+            """
+            params = []
+            if company is not None:
+                # Filter by company domain suffix
+                # Need to match subdomains ending with '.company' or exactly 'company'
+                query += " AND (`Pulte subdomain` LIKE ? OR `Pulte subdomain` = ?)"
+                params.append('%.' + company)
+                params.append(company)
 
         if fraud != 'All':
-            if hub == "ALL":
-                query += " AND Fraud_Risk_Tags LIKE ?"
-                params.append(f'%{fraud}%')
-            else:
-                query += " AND Fraud_Risk_Tags LIKE ?"
-                params.append(f'%{fraud}%')
+            query += " AND Fraud_Risk_Tags LIKE ?"
+            params.append(f'%{fraud}%')
 
         if show_cname_only:
-            if hub == "ALL":
-                query += " AND Ultimate_CNAME_Shared = 1"
-            else:
-                query += " AND Ultimate_CNAME_Shared = 1"
+            query += " AND Ultimate_CNAME_Shared = 1"
 
         query += " LIMIT 1000"
 
