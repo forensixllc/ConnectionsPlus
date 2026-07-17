@@ -4,10 +4,11 @@ import sqlite3
 import traceback
 import os
 import json
-import io
+import requests
+import tempfile
 
 # ------------------------------------------------------------
-# Custom CSS
+# Custom CSS – black background, white text
 # ------------------------------------------------------------
 st.markdown(
     """
@@ -23,96 +24,40 @@ st.title("Pulte +")
 st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# 1. Database setup: try connections.db, else upload
+# 1. Download database from Dropbox
 # ------------------------------------------------------------
-DB_PATH = "connections.db"
-VALID_DB = None   # path to the database file to use
+DROPBOX_LINK = "https://www.dropbox.com/scl/fi/hxnz1doh5cz73p9wuafqk/connections.db?rlkey=tq8jmfu23wvh1ldjp2zs933rs&dl=1"
 
-def is_valid_sqlite(filepath):
+@st.cache_resource(ttl=3600)   # re‑download every hour
+def download_db():
     try:
-        conn = sqlite3.connect(filepath)
-        conn.execute("SELECT 1")
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-# Check if default exists and is valid
-if os.path.exists(DB_PATH) and is_valid_sqlite(DB_PATH):
-    VALID_DB = DB_PATH
-    st.success("✅ Using `connections.db`")
-else:
-    if os.path.exists(DB_PATH):
-        st.warning(f"`{DB_PATH}` exists but is not a valid SQLite database. Please upload a data file (SQLite, CSV, or JSON).")
-    else:
-        st.info("No `connections.db` found. Upload a data file (SQLite, CSV, or JSON).")
-    
-    uploaded_data = st.file_uploader("Upload database file (SQLite .db, CSV, or JSON)", type=["db", "csv", "json"])
-    
-    if uploaded_data is not None:
-        # Determine file type by extension or content
-        file_ext = uploaded_data.name.split('.')[-1].lower()
-        
-        if file_ext == 'db':
-            # Save to temporary file and validate
-            with open("uploaded.db", "wb") as f:
-                f.write(uploaded_data.getbuffer())
-            if is_valid_sqlite("uploaded.db"):
-                VALID_DB = "uploaded.db"
-                st.success("✅ SQLite database uploaded and validated.")
-            else:
-                st.error("❌ Uploaded .db file is not a valid SQLite database.")
-        
-        elif file_ext == 'csv':
-            # Read CSV into pandas, create an in‑memory SQLite DB
-            try:
-                df = pd.read_csv(uploaded_data)
-                # Create a temporary file for SQLite
-                temp_db = "temp_uploaded.db"
-                conn = sqlite3.connect(temp_db)
-                df.to_sql("overlaps", conn, if_exists="replace", index=False)
-                conn.close()
-                if is_valid_sqlite(temp_db):
-                    VALID_DB = temp_db
-                    st.success(f"✅ CSV loaded: {len(df)} rows, {len(df.columns)} columns.")
-                else:
-                    st.error("Failed to create SQLite from CSV.")
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
-        
-        elif file_ext == 'json':
-            # Try to interpret as a list of rows (list of dicts) or a table
-            try:
-                data = json.load(uploaded_data)
-                if isinstance(data, list) and len(data) > 0:
-                    # Assume it's a list of dictionaries (rows)
-                    df = pd.DataFrame(data)
-                    temp_db = "temp_uploaded.json.db"
-                    conn = sqlite3.connect(temp_db)
-                    df.to_sql("overlaps", conn, if_exists="replace", index=False)
-                    conn.close()
-                    if is_valid_sqlite(temp_db):
-                        VALID_DB = temp_db
-                        st.success(f"✅ JSON loaded: {len(df)} rows, {len(df.columns)} columns.")
-                    else:
-                        st.error("Failed to create SQLite from JSON.")
-                else:
-                    st.error("JSON must be a list of objects (rows).")
-            except Exception as e:
-                st.error(f"Error parsing JSON: {e}")
+        response = requests.get(DROPBOX_LINK, stream=True)
+        if response.status_code == 200:
+            # Save to a temporary file that persists for the session
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+            temp_file.write(response.content)
+            temp_file.close()
+            return temp_file.name
         else:
-            st.error("Unsupported file type. Please upload .db, .csv, or .json.")
+            st.error(f"Failed to download database (HTTP {response.status_code})")
+            return None
+    except Exception as e:
+        st.error(f"Download error: {e}")
+        return None
 
-if VALID_DB is None:
+db_path = download_db()
+if db_path is None:
     st.stop()
 
+st.success("✅ Database loaded from Dropbox.")
+
 # ------------------------------------------------------------
-# 2. Helper: run query with fresh connection
+# 2. Helper: run query with a fresh connection
 # ------------------------------------------------------------
 def run_query(sql, params=None):
     conn = None
     try:
-        conn = sqlite3.connect(VALID_DB, check_same_thread=False)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
         df = pd.read_sql_query(sql, conn, params=params)
         return df, None
     except Exception as e:
@@ -132,7 +77,7 @@ def get_schema():
 
 schema_df, schema_err = get_schema()
 if schema_err:
-    st.error(f"Table 'overlaps' not found or inaccessible:\n{schema_err}")
+    st.error(f"Table 'overlaps' not found in the database:\n{schema_err}")
     st.stop()
 
 columns = schema_df['name'].tolist()
@@ -258,7 +203,7 @@ if st.button("Search"):
             st.dataframe(df_result)
 
 # ------------------------------------------------------------
-# 9. Schema reference
+# 9. Schema reference (collapsible)
 # ------------------------------------------------------------
 with st.expander("📋 Database Schema"):
     st.dataframe(schema_df)
