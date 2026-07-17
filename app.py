@@ -2,10 +2,11 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import traceback
+import json
 import os
 
 # ------------------------------------------------------------
-# Custom CSS: black background, white text
+# Custom CSS: black background, white text, clean style
 # ------------------------------------------------------------
 st.markdown(
     """
@@ -14,33 +15,34 @@ st.markdown(
         background-color: black;
         color: white;
     }
+    .stSelectbox, .stTextInput, .stButton, .stCheckbox {
+        color: white;
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-st.title("🔍 Database Debug (Minimal)")
-st.write("---")
+st.title("Pulte +")
+st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# Database path (edit this or use the text input below)
+# 1. Database setup – use connections.db
 # ------------------------------------------------------------
-db_path = st.text_input("Database file path", value="overlaps.db")
-st.write(f"Using: `{db_path}`")
+DB_PATH = "connections.db"   # <-- your database file
 
-if not os.path.exists(db_path):
-    st.error(f"❌ File not found: {db_path}")
+if not os.path.exists(DB_PATH):
+    st.error(f"❌ Database file '{DB_PATH}' not found. Please make sure it exists.")
     st.stop()
-else:
-    st.success(f"✅ File exists ({os.path.getsize(db_path)} bytes)")
 
 # ------------------------------------------------------------
-# Helper: run query with fresh connection
+# 2. Helper: run a query with a fresh connection
 # ------------------------------------------------------------
 def run_query(sql, params=None):
+    """Execute SQL and return (DataFrame, error_message_or_None)."""
     conn = None
     try:
-        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         df = pd.read_sql_query(sql, conn, params=params)
         return df, None
     except Exception as e:
@@ -50,56 +52,66 @@ def run_query(sql, params=None):
             conn.close()
 
 # ------------------------------------------------------------
-# 1. List tables
+# 3. Cached function to get fraud flags (runs query once)
 # ------------------------------------------------------------
-st.subheader("📋 Tables in database")
-tables_df, err = run_query("SELECT name FROM sqlite_master WHERE type='table';")
-if err:
-    st.error(f"Could not list tables:\n{err}")
-else:
-    st.dataframe(tables_df)
-    if 'overlaps' in tables_df['name'].values:
-        st.success("✅ Table 'overlaps' exists.")
-    else:
-        st.warning("⚠️ Table 'overlaps' not found.")
-
-# ------------------------------------------------------------
-# 2. Show schema of 'overlaps' if it exists
-# ------------------------------------------------------------
-if 'overlaps' in tables_df['name'].values:
-    st.subheader("📋 Schema of 'overlaps'")
-    schema_df, err = run_query("PRAGMA table_info(overlaps);")
-    if err:
-        st.error(f"Could not get schema:\n{err}")
-    else:
-        st.dataframe(schema_df)
-
-# ------------------------------------------------------------
-# 3. Run the original query
-# ------------------------------------------------------------
-st.subheader("🧪 Run Original Query")
-if st.button("Execute SELECT DISTINCT Fraud_Risk_Tags FROM overlaps"):
+@st.cache_data(ttl=600)   # cache for 10 minutes
+def get_fraud_flags():
     sql = """
         SELECT DISTINCT Fraud_Risk_Tags 
         FROM overlaps 
         WHERE Fraud_Risk_Tags IS NOT NULL AND Fraud_Risk_Tags != ''
     """
-    with st.spinner("Running..."):
-        df, err = run_query(sql)
-        if err:
-            st.error(f"❌ Query failed:\n\n{err}")
-        else:
-            st.success(f"✅ Success! Found {len(df)} distinct values.")
-            st.dataframe(df)
+    df, err = run_query(sql)
+    if err:
+        st.error(f"Error loading fraud flags:\n{err}")
+        return pd.DataFrame(columns=['Fraud_Risk_Tags'])  # empty fallback
+    return df
 
 # ------------------------------------------------------------
-# 4. Custom query (optional)
+# 4. Load fraud flags (with error handling)
 # ------------------------------------------------------------
-st.subheader("✏️ Custom SQL")
-custom_sql = st.text_area("Enter SQL", "SELECT * FROM overlaps LIMIT 5")
-if st.button("Run Custom Query"):
-    df, err = run_query(custom_sql)
+fraud_df = get_fraud_flags()
+fraud_options = fraud_df['Fraud_Risk_Tags'].tolist() if not fraud_df.empty else []
+
+# ------------------------------------------------------------
+# 5. UI Controls
+# ------------------------------------------------------------
+col1, col2, col3 = st.columns([2, 1, 1])
+
+with col1:
+    search_term = st.text_input("Search", placeholder="Enter domain or company name...")
+
+with col2:
+    hub_choice = st.selectbox("Choose hub", ["All"] + ["Hub A", "Hub B", "Hub C"])  # adjust as needed
+
+with col3:
+    fraud_flag = st.selectbox("Fraud flag", ["All"] + fraud_options)
+
+# Additional options (matching your old layout)
+show_all_pulte = st.checkbox("All Pulte Companies", value=True)
+show_only_shared_cname = st.checkbox("Only show shared ultimate CNAME", value=False)
+
+# ------------------------------------------------------------
+# 6. Query execution (example – adapt to your actual data)
+# ------------------------------------------------------------
+if st.button("Search"):
+    # Build your query based on filters – this is a placeholder.
+    # Replace with your actual table/columns.
+    st.write("### Search Results")
+    
+    # Example: show a sample of the overlaps table
+    sample_sql = "SELECT * FROM overlaps LIMIT 10"
+    df, err = run_query(sample_sql)
     if err:
-        st.error(f"❌ Error:\n\n{err}")
+        st.error(f"Error running query:\n{err}")
     else:
         st.dataframe(df)
+
+# ------------------------------------------------------------
+# 7. Optional: Show current fraud flags list for reference
+# ------------------------------------------------------------
+with st.expander("📋 Available Fraud Flags"):
+    if not fraud_df.empty:
+        st.dataframe(fraud_df)
+    else:
+        st.warning("No fraud flags loaded.")
