@@ -215,3 +215,4 @@ with st.expander("ℹ️ Database Schema (debug)"):
         st.dataframe(df_schema)
     except Exception as e:
         st.error(f"Could not get schema: {e}")
+        
