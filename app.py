@@ -12,7 +12,7 @@ st.markdown(
     """
     <style>
     .stApp { background-color: black; color: white; }
-    .stSelectbox, .stTextInput, .stButton, .stCheckbox { color: white; }
+    .stSelectbox, .stTextInput, .stButton, .stCheckbox, .stFileUploader { color: white; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -22,36 +22,16 @@ st.title("Pulte +")
 st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# 1. List all .db files in the current directory
+# 1. Database – hardcoded to connections.db
 # ------------------------------------------------------------
-current_dir = os.getcwd()
-db_files = [f for f in os.listdir(current_dir) if f.endswith('.db')]
+DB_PATH = "connections.db"
 
-if not db_files:
-    st.error("No .db files found in the current directory. Please upload a database file.")
-    uploaded_db = st.file_uploader("Upload a SQLite database file", type=["db"])
-    if uploaded_db:
-        # Save the uploaded file to disk (optional)
-        with open("uploaded.db", "wb") as f:
-            f.write(uploaded_db.getbuffer())
-        db_files = ["uploaded.db"]
-        st.success("File uploaded successfully.")
-    else:
-        st.stop()
-else:
-    st.write(f"Found {len(db_files)} database file(s).")
+if not os.path.exists(DB_PATH):
+    st.error(f"❌ Database file '{DB_PATH}' not found. Please upload a valid SQLite database or check the filename.")
+    st.stop()
 
-# ------------------------------------------------------------
-# 2. Database selection
-# ------------------------------------------------------------
-selected_db = st.selectbox("Choose a database file", db_files)
-DB_PATH = selected_db
-
-# ------------------------------------------------------------
-# 3. Validate that it's a real SQLite database
-# ------------------------------------------------------------
+# Validate that it's a real SQLite database
 def is_valid_sqlite(filepath):
-    """Return True if file is a readable SQLite database."""
     try:
         conn = sqlite3.connect(filepath)
         conn.execute("SELECT 1")
@@ -61,17 +41,16 @@ def is_valid_sqlite(filepath):
         return False
 
 if not is_valid_sqlite(DB_PATH):
-    st.error(f"❌ The file `{DB_PATH}` is not a valid SQLite database. Please choose another file or upload a correct one.")
-    # Show the first few bytes to help diagnose
+    st.error(f"❌ The file '{DB_PATH}' is not a valid SQLite database. Please replace it with a correct .db file.")
     with open(DB_PATH, "rb") as f:
         header = f.read(16)
-    st.write(f"File header (first 16 bytes): {header.hex()}")
+    st.write(f"File header (first 16 bytes): {header.hex()} – expected SQLite magic: 53 51 4C 69 74 65 ...")
     st.stop()
 
-st.success(f"✅ Database `{DB_PATH}` is valid and ready.")
+st.success("✅ Database connected.")
 
 # ------------------------------------------------------------
-# 4. Helper: run query with fresh connection
+# 2. Helper: run query with a fresh connection
 # ------------------------------------------------------------
 def run_query(sql, params=None):
     conn = None
@@ -86,55 +65,153 @@ def run_query(sql, params=None):
             conn.close()
 
 # ------------------------------------------------------------
-# 5. Cached function to get fraud flags
+# 3. Load company names and fraud flags (cached)
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
-def get_fraud_flags():
+def load_companies():
+    # Assumes a column 'company' or 'domain' – adjust if different.
+    # Try common column names: 'Company', 'company_name', 'Domain', etc.
+    # We'll try to find a suitable column from the 'overlaps' table.
+    # First, get column names.
+    sample_sql = "SELECT * FROM overlaps LIMIT 1"
+    df_sample, err = run_query(sample_sql)
+    if err or df_sample.empty:
+        return [], []
+    columns = df_sample.columns.tolist()
+    # Look for a column that might contain company/domain names.
+    possible_cols = ['company', 'Company', 'company_name', 'domain', 'Domain', 'source_domain']
+    company_col = None
+    for col in possible_cols:
+        if col in columns:
+            company_col = col
+            break
+    if company_col is None:
+        # Fallback: use the first text column.
+        for col in columns:
+            if df_sample[col].dtype == object:
+                company_col = col
+                break
+    if company_col is None:
+        st.warning("Could not identify a company/domain column. Please check database schema.")
+        return [], []
+    
+    # Get distinct company names
+    sql = f"SELECT DISTINCT {company_col} FROM overlaps WHERE {company_col} IS NOT NULL AND {company_col} != ''"
+    df_comp, err = run_query(sql)
+    if err or df_comp.empty:
+        return [], []
+    companies = df_comp[company_col].tolist()
+    return companies, company_col
+
+companies, company_col = load_companies()
+
+if not companies:
+    st.warning("No companies found in the database. Please check the table 'overlaps'.")
+    # Still allow JSON upload? Possibly, but we'll stop.
+    # We'll continue and let the user upload JSON to work with.
+
+@st.cache_data(ttl=600)
+def load_fraud_flags():
     sql = """
         SELECT DISTINCT Fraud_Risk_Tags 
         FROM overlaps 
         WHERE Fraud_Risk_Tags IS NOT NULL AND Fraud_Risk_Tags != ''
     """
     df, err = run_query(sql)
-    if err:
-        st.error(f"Error loading fraud flags:\n{err}")
-        return pd.DataFrame(columns=['Fraud_Risk_Tags'])
-    return df
+    if err or df.empty:
+        return []
+    return df['Fraud_Risk_Tags'].tolist()
+
+fraud_flags = load_fraud_flags()
 
 # ------------------------------------------------------------
-# 6. Load fraud flags and show UI
+# 4. UI Controls
 # ------------------------------------------------------------
-fraud_df = get_fraud_flags()
-fraud_options = fraud_df['Fraud_Risk_Tags'].tolist() if not fraud_df.empty else []
+# First dropdown: Company
+company_options = ["All Pulte Companies"] + companies if companies else ["All Pulte Companies"]
+selected_company = st.selectbox("Select Company", company_options, index=0)
 
-# UI Controls (same as before)
-col1, col2, col3 = st.columns([2, 1, 1])
+# Second dropdown: Fraud flag
+fraud_options = ["All"] + fraud_flags if fraud_flags else ["All"]
+selected_fraud = st.selectbox("Fraud Flag", fraud_options, index=0)
 
-with col1:
-    search_term = st.text_input("Search", placeholder="Enter domain or company name...")
+# File upload for JSON (c99.nl)
+uploaded_file = st.file_uploader("Upload c99.nl JSON (optional)", type=["json"])
 
-with col2:
-    hub_choice = st.selectbox("Choose hub", ["All"] + ["Hub A", "Hub B", "Hub C"])  # adjust
+uploaded_domains = []
+if uploaded_file is not None:
+    try:
+        data = json.load(uploaded_file)
+        # Expect a list of domains/subdomains – could be a list of strings or dict with key 'domains'
+        if isinstance(data, list):
+            uploaded_domains = [str(item) for item in data]
+        elif isinstance(data, dict):
+            # Try common keys: 'domains', 'subdomains', 'data'
+            for key in ['domains', 'subdomains', 'data']:
+                if key in data and isinstance(data[key], list):
+                    uploaded_domains = [str(item) for item in data[key]]
+                    break
+            if not uploaded_domains:
+                # Fallback: take all string values from dict?
+                pass
+        st.success(f"Loaded {len(uploaded_domains)} domains from JSON.")
+    except Exception as e:
+        st.error(f"Error parsing JSON: {e}")
 
-with col3:
-    fraud_flag = st.selectbox("Fraud flag", ["All"] + fraud_options)
-
-show_all_pulte = st.checkbox("All Pulte Companies", value=True)
-show_only_shared_cname = st.checkbox("Only show shared ultimate CNAME", value=False)
-
+# ------------------------------------------------------------
+# 5. Search button and query building
+# ------------------------------------------------------------
 if st.button("Search"):
-    # Example placeholder query – replace with your actual logic
+    # Build the base query
+    # We need to know the columns. Let's get all columns from overlaps.
+    # We'll assume we want all rows that match company and fraud flag.
+    # Also, if uploaded_domains is non-empty, we want to intersect: only rows where the domain (company_col) is in uploaded_domains.
+    
+    # To make it generic, we'll select all columns from overlaps.
+    # We'll filter on company_col and fraud flag.
+    
+    # First, we need to know the company column name (already determined).
+    if not company_col:
+        st.error("Company column not identified. Cannot proceed.")
+        st.stop()
+    
+    # Build WHERE clause
+    where_clauses = []
+    params = []
+    
+    if selected_company != "All Pulte Companies":
+        where_clauses.append(f"{company_col} = ?")
+        params.append(selected_company)
+    
+    if selected_fraud != "All":
+        where_clauses.append("Fraud_Risk_Tags = ?")
+        params.append(selected_fraud)
+    
+    # If uploaded_domains is not empty, add an IN clause on company_col
+    if uploaded_domains:
+        placeholders = ','.join(['?'] * len(uploaded_domains))
+        where_clauses.append(f"{company_col} IN ({placeholders})")
+        params.extend(uploaded_domains)
+    
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    
+    query = f"SELECT * FROM overlaps WHERE {where_sql}"
+    
     st.write("### Search Results")
-    sample_sql = "SELECT * FROM overlaps LIMIT 10"
-    df, err = run_query(sample_sql)
-    if err:
-        st.error(f"Error running query:\n{err}")
-    else:
-        st.dataframe(df)
+    with st.spinner("Querying database..."):
+        df_result, err = run_query(query, params)
+        if err:
+            st.error(f"Query failed:\n{err}")
+        else:
+            st.success(f"Found {len(df_result)} matching rows.")
+            st.dataframe(df_result)
 
-# Optional: Show fraud flags list
-with st.expander("📋 Available Fraud Flags"):
-    if not fraud_df.empty:
-        st.dataframe(fraud_df)
-    else:
-        st.warning("No fraud flags loaded.")
+# ------------------------------------------------------------
+# 6. Optional: Show schema for debugging (can be hidden)
+# ------------------------------------------------------------
+with st.expander("ℹ️ Database Schema (debug)"):
+    try:
+        df_schema, _ = run_query("PRAGMA table_info(overlaps)")
+        st.dataframe(df_schema)
+    except Exception as e:
+        st.error(f"Could not get schema: {e}")
