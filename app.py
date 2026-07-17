@@ -4,6 +4,7 @@ import sqlite3
 import traceback
 import os
 import json
+import io
 
 # ------------------------------------------------------------
 # Custom CSS
@@ -22,10 +23,10 @@ st.title("Pulte +")
 st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# 1. Database setup – try connections.db, else allow upload
+# 1. Database setup: try connections.db, else upload
 # ------------------------------------------------------------
 DB_PATH = "connections.db"
-VALID_DB = None   # will hold the path to a valid database
+VALID_DB = None   # path to the database file to use
 
 def is_valid_sqlite(filepath):
     try:
@@ -42,26 +43,65 @@ if os.path.exists(DB_PATH) and is_valid_sqlite(DB_PATH):
     st.success("✅ Using `connections.db`")
 else:
     if os.path.exists(DB_PATH):
-        st.error(f"❌ `{DB_PATH}` exists but is not a valid SQLite database. Please upload a correct .db file.")
-        # Show header for debugging
-        with open(DB_PATH, "rb") as f:
-            header = f.read(16)
-        st.write(f"File header: {header.hex()}")
+        st.warning(f"`{DB_PATH}` exists but is not a valid SQLite database. Please upload a data file (SQLite, CSV, or JSON).")
     else:
-        st.warning(f"`{DB_PATH}` not found. Please upload a SQLite database.")
+        st.info("No `connections.db` found. Upload a data file (SQLite, CSV, or JSON).")
     
-    # File uploader for database
-    uploaded_db = st.file_uploader("Upload a SQLite database file (.db)", type=["db"])
-    if uploaded_db is not None:
-        # Save to a temporary file (or just use the uploaded file object? We'll save)
-        with open("uploaded.db", "wb") as f:
-            f.write(uploaded_db.getbuffer())
-        if is_valid_sqlite("uploaded.db"):
-            VALID_DB = "uploaded.db"
-            st.success("✅ Database uploaded and validated.")
+    uploaded_data = st.file_uploader("Upload database file (SQLite .db, CSV, or JSON)", type=["db", "csv", "json"])
+    
+    if uploaded_data is not None:
+        # Determine file type by extension or content
+        file_ext = uploaded_data.name.split('.')[-1].lower()
+        
+        if file_ext == 'db':
+            # Save to temporary file and validate
+            with open("uploaded.db", "wb") as f:
+                f.write(uploaded_data.getbuffer())
+            if is_valid_sqlite("uploaded.db"):
+                VALID_DB = "uploaded.db"
+                st.success("✅ SQLite database uploaded and validated.")
+            else:
+                st.error("❌ Uploaded .db file is not a valid SQLite database.")
+        
+        elif file_ext == 'csv':
+            # Read CSV into pandas, create an in‑memory SQLite DB
+            try:
+                df = pd.read_csv(uploaded_data)
+                # Create a temporary file for SQLite
+                temp_db = "temp_uploaded.db"
+                conn = sqlite3.connect(temp_db)
+                df.to_sql("overlaps", conn, if_exists="replace", index=False)
+                conn.close()
+                if is_valid_sqlite(temp_db):
+                    VALID_DB = temp_db
+                    st.success(f"✅ CSV loaded: {len(df)} rows, {len(df.columns)} columns.")
+                else:
+                    st.error("Failed to create SQLite from CSV.")
+            except Exception as e:
+                st.error(f"Error reading CSV: {e}")
+        
+        elif file_ext == 'json':
+            # Try to interpret as a list of rows (list of dicts) or a table
+            try:
+                data = json.load(uploaded_data)
+                if isinstance(data, list) and len(data) > 0:
+                    # Assume it's a list of dictionaries (rows)
+                    df = pd.DataFrame(data)
+                    temp_db = "temp_uploaded.json.db"
+                    conn = sqlite3.connect(temp_db)
+                    df.to_sql("overlaps", conn, if_exists="replace", index=False)
+                    conn.close()
+                    if is_valid_sqlite(temp_db):
+                        VALID_DB = temp_db
+                        st.success(f"✅ JSON loaded: {len(df)} rows, {len(df.columns)} columns.")
+                    else:
+                        st.error("Failed to create SQLite from JSON.")
+                else:
+                    st.error("JSON must be a list of objects (rows).")
+            except Exception as e:
+                st.error(f"Error parsing JSON: {e}")
         else:
-            st.error("❌ Uploaded file is not a valid SQLite database.")
-            st.stop()
+            st.error("Unsupported file type. Please upload .db, .csv, or .json.")
 
 if VALID_DB is None:
     st.stop()
@@ -106,7 +146,6 @@ def auto_detect_company_col(columns):
     for col in possible:
         if col in columns:
             return col
-    # fallback: first text column from sample
     try:
         sample, err = run_query("SELECT * FROM overlaps LIMIT 1")
         if err or sample.empty:
@@ -166,12 +205,12 @@ selected_company = st.selectbox("Select Company", company_options, index=0)
 fraud_options = ["All"] + fraud_flags if fraud_flags else ["All"]
 selected_fraud = st.selectbox("Fraud Flag", fraud_options, index=0)
 
-uploaded_file = st.file_uploader("Upload c99.nl JSON (optional)", type=["json"])
+uploaded_json = st.file_uploader("Upload c99.nl JSON (optional) – list of domains", type=["json"])
 
 uploaded_domains = []
-if uploaded_file is not None:
+if uploaded_json is not None:
     try:
-        data = json.load(uploaded_file)
+        data = json.load(uploaded_json)
         if isinstance(data, list):
             uploaded_domains = [str(item) for item in data]
         elif isinstance(data, dict):
