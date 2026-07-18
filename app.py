@@ -69,6 +69,22 @@ def run_query(sql, params=None):
             conn.close()
 
 # ------------------------------------------------------------
+# 2b. Helper: CSV download button
+# ------------------------------------------------------------
+@st.cache_data
+def to_csv_bytes(df):
+    return df.to_csv(index=False).encode('utf-8')
+
+def download_button_for(df, filename, key):
+    st.download_button(
+        label=f"⬇️ Download {filename}",
+        data=to_csv_bytes(df),
+        file_name=filename,
+        mime="text/csv",
+        key=key,
+    )
+
+# ------------------------------------------------------------
 # 3. Load dropdown data (cached)
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
@@ -188,6 +204,7 @@ if st.session_state.get('search_done', False):
             st.info("No overlaps found for the selected filters.")
         else:
             st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
+            download_button_for(df_apex, "apex_summary.csv", key="dl_apex_summary")
             render_table_with_buttons(
                 df_apex,
                 name_col='Overlapping_Apex',
@@ -223,6 +240,8 @@ if st.session_state.get('search_done', False):
                     if df_sub.empty:
                         st.info("No subdomains found for this apex.")
                     else:
+                        safe_apex = apex.replace('/', '_').replace(':', '_')
+                        download_button_for(df_sub, f"subdomains_{safe_apex}.csv", key="dl_sub_summary")
                         render_table_with_buttons(
                             df_sub,
                             name_col='Overlapping_subdomain',
@@ -247,6 +266,17 @@ if st.session_state.get('search_done', False):
                         if st.session_state.get('show_subdomain_details') and st.session_state.get('selected_subdomain'):
                             sub = st.session_state['selected_subdomain']
                             st.write(f"### 📋 Detailed overlaps for `{sub}`")
+
+                            # Get total count first so we know if we're truncating
+                            count_query = f"""
+                                SELECT COUNT(*) as total
+                                FROM overlaps
+                                WHERE {where_sql} AND Overlapping_subdomain = ?
+                            """
+                            params_count = params + [sub]
+                            df_count, err_count = run_query(count_query, params_count)
+                            total_rows = int(df_count['total'].iloc[0]) if df_count is not None and not df_count.empty else 0
+
                             detail_query = f"""
                                 SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
                                 FROM overlaps
@@ -258,9 +288,29 @@ if st.session_state.get('search_done', False):
                             if err_detail:
                                 st.error(f"Error loading details: {err_detail}")
                             else:
+                                safe_sub = sub.replace('/', '_').replace(':', '_')
+
+                                if total_rows > 1000:
+                                    st.info(
+                                        f"Showing first 1,000 of {total_rows:,} rows for this subdomain. "
+                                        f"Download the full CSV below to see everything."
+                                    )
+                                    # Full unbounded query just for the CSV export
+                                    full_query = f"""
+                                        SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
+                                        FROM overlaps
+                                        WHERE {where_sql} AND Overlapping_subdomain = ?
+                                    """
+                                    df_full, err_full = run_query(full_query, params_detail)
+                                    if err_full:
+                                        st.error(f"Error preparing full export: {err_full}")
+                                    else:
+                                        download_button_for(df_full, f"details_{safe_sub}_full.csv", key="dl_detail_full")
+                                else:
+                                    download_button_for(df_detail, f"details_{safe_sub}.csv", key="dl_detail")
+
                                 st.dataframe(df_detail, use_container_width=True)
-                                if len(df_detail) == 1000:
-                                    st.info("Showing first 1000 rows for this subdomain. Refine your filters to see more.")
+
                             # Back to subdomain list
                             if st.button("← Back to subdomains"):
                                 st.session_state['show_subdomain_details'] = False
