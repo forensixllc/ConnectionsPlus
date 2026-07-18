@@ -31,11 +31,8 @@ DROPBOX_LINK = "https://www.dropbox.com/scl/fi/sb8hkhj0mcakyavehh7xe/connections
 
 @st.cache_resource(ttl=3600)
 def get_db_path():
-    # If running in a local environment with the file present, use it
     if os.path.exists(LOCAL_DB):
         return LOCAL_DB
-    
-    # Otherwise download from Dropbox (show spinner)
     with st.spinner("📥 Downloading database from Dropbox..."):
         try:
             response = requests.get(DROPBOX_LINK, stream=True)
@@ -123,7 +120,7 @@ if selected_menu1 == "Upload c99.nl JSON":
             st.error(f"JSON error: {e}")
 
 # ------------------------------------------------------------
-# 5. Search button – two‑step drill‑down
+# 5. Search button – three‑level drill‑down
 # ------------------------------------------------------------
 if st.button("🔍 Search", type="primary"):
     # Build WHERE clause for filters
@@ -146,7 +143,13 @@ if st.button("🔍 Search", type="primary"):
 
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-    # --- Step A: Get apex domain counts ---
+    # Clear previous drill‑down state
+    st.session_state['show_details'] = False
+    st.session_state['selected_apex'] = None
+    st.session_state['show_subdomain_details'] = False
+    st.session_state['selected_subdomain'] = None
+
+    # --- Level 1: Apex summary ---
     apex_query = f"""
         SELECT Overlapping_Apex, COUNT(*) as count
         FROM overlaps
@@ -162,38 +165,77 @@ if st.button("🔍 Search", type="primary"):
             st.info("No overlaps found for the selected filters.")
         else:
             st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
-            # Display each apex with a "View" button
-            for idx, row in df_apex.iterrows():
+            for _, row in df_apex.iterrows():
                 apex = row['Overlapping_Apex']
                 count = row['count']
                 col1, col2 = st.columns([4, 1])
                 with col1:
                     st.write(f"**{apex}** — {count} overlapping subdomains")
                 with col2:
-                    if st.button("View", key=f"view_{apex}"):
+                    if st.button("View", key=f"view_apex_{apex}"):
                         st.session_state['selected_apex'] = apex
                         st.session_state['show_details'] = True
+                        st.session_state['show_subdomain_details'] = False
+                        st.session_state['selected_subdomain'] = None
+                        st.rerun()
 
-            # --- Step B: If an apex is selected, show details ---
+            # --- Level 2: Subdomain summary (if an apex is selected) ---
             if st.session_state.get('show_details') and st.session_state.get('selected_apex'):
                 apex = st.session_state['selected_apex']
-                st.write(f"### 🔍 Details for `{apex}`")
-                detail_query = f"""
-                    SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
+                st.write(f"### 🔍 Subdomains under `{apex}`")
+                sub_query = f"""
+                    SELECT Overlapping_subdomain, COUNT(*) as cnt
                     FROM overlaps
                     WHERE {where_sql} AND Overlapping_Apex = ?
-                    LIMIT 1000
+                    GROUP BY Overlapping_subdomain
+                    ORDER BY cnt DESC
                 """
-                params_detail = params + [apex]
-                df_detail, err_detail = run_query(detail_query, params_detail)
-                if err_detail:
-                    st.error(f"Error loading details: {err_detail}")
+                params_sub = params + [apex]
+                df_sub, err_sub = run_query(sub_query, params_sub)
+                if err_sub:
+                    st.error(f"Error loading subdomains: {err_sub}")
                 else:
-                    st.dataframe(df_detail, use_container_width=True)
-                    if len(df_detail) == 1000:
-                        st.info("Showing first 1000 rows for this apex. Refine your filters to see more.")
-                # Back button
-                if st.button("← Back to summary"):
-                    st.session_state['show_details'] = False
-                    st.session_state['selected_apex'] = None
-                    st.rerun()
+                    if df_sub.empty:
+                        st.info("No subdomains found for this apex.")
+                    else:
+                        for _, row_sub in df_sub.iterrows():
+                            sub = row_sub['Overlapping_subdomain']
+                            cnt = row_sub['cnt']
+                            col1, col2 = st.columns([4, 1])
+                            with col1:
+                                st.write(f"**{sub}** — {cnt} overlaps")
+                            with col2:
+                                if st.button("View", key=f"view_sub_{sub}"):
+                                    st.session_state['selected_subdomain'] = sub
+                                    st.session_state['show_subdomain_details'] = True
+                                    st.rerun()
+
+                    # Back button to apex summary
+                    if st.button("← Back to apex summary"):
+                        st.session_state['show_details'] = False
+                        st.session_state['selected_apex'] = None
+                        st.rerun()
+
+                    # --- Level 3: Row details (if a subdomain is selected) ---
+                    if st.session_state.get('show_subdomain_details') and st.session_state.get('selected_subdomain'):
+                        sub = st.session_state['selected_subdomain']
+                        st.write(f"### 📋 Detailed overlaps for `{sub}`")
+                        detail_query = f"""
+                            SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
+                            FROM overlaps
+                            WHERE {where_sql} AND Overlapping_subdomain = ?
+                            LIMIT 1000
+                        """
+                        params_detail = params + [sub]
+                        df_detail, err_detail = run_query(detail_query, params_detail)
+                        if err_detail:
+                            st.error(f"Error loading details: {err_detail}")
+                        else:
+                            st.dataframe(df_detail, use_container_width=True)
+                            if len(df_detail) == 1000:
+                                st.info("Showing first 1000 rows for this subdomain. Refine your filters to see more.")
+                        # Back to subdomain list
+                        if st.button("← Back to subdomains"):
+                            st.session_state['show_subdomain_details'] = False
+                            st.session_state['selected_subdomain'] = None
+                            st.rerun()
