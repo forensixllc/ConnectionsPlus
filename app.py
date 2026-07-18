@@ -1,11 +1,11 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
-import traceback
 import json
 import requests
 import tempfile
 import os
+import traceback
 
 # ------------------------------------------------------------
 # Custom CSS – black background, white text
@@ -20,16 +20,21 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Pulte +")
+st.title("🔗 Pulte +")
 st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# 1. Download database from Dropbox
+# 1. Locate database – local /content/ first, else download
 # ------------------------------------------------------------
-DROPBOX_LINK = "https://www.dropbox.com/scl/fi/hxnz1doh5cz73p9wuafqk/connections.db?rlkey=tq8jmfu23wvh1ldjp2zs933rs&dl=1"
+LOCAL_DB = '/content/connections.db'
+# UPDATED Dropbox link (with dl=1 for direct download)
+DROPBOX_LINK = "https://www.dropbox.com/scl/fi/xk1vm2ro4im259cojybj1/connections.db?rlkey=sohr6d899sqneknp9emnp78qs&st=79wqjf7s&dl=1"
 
 @st.cache_resource(ttl=3600)
-def download_db():
+def get_db_path():
+    if os.path.exists(LOCAL_DB):
+        return LOCAL_DB
+    st.info("Local database not found. Downloading from Dropbox...")
     try:
         response = requests.get(DROPBOX_LINK, stream=True)
         if response.status_code == 200:
@@ -44,7 +49,7 @@ def download_db():
         st.error(f"Download error: {e}")
         return None
 
-db_path = download_db()
+db_path = get_db_path()
 if db_path is None:
     st.stop()
 
@@ -64,76 +69,49 @@ def run_query(sql, params=None):
             conn.close()
 
 # ------------------------------------------------------------
-# 3. Get columns and auto‑detect company column
-# ------------------------------------------------------------
-schema_df, err = run_query("PRAGMA table_info(overlaps)")
-if err or schema_df.empty:
-    st.error(f"Table 'overlaps' not found: {err}")
-    st.stop()
-columns = schema_df['name'].tolist()
-
-# Auto‑detect company column (fallback to manual if needed)
-def auto_detect_company_col(columns):
-    possible = ['company', 'Company', 'company_name', 'domain', 'Domain', 'source_domain']
-    for col in possible:
-        if col in columns:
-            return col
-    # fallback: first text column from sample
-    try:
-        sample, _ = run_query("SELECT * FROM overlaps LIMIT 1")
-        if sample is not None and not sample.empty:
-            for col in columns:
-                if sample[col].dtype == object:
-                    return col
-    except:
-        pass
-    return None
-
-company_col = auto_detect_company_col(columns)
-if company_col is None:
-    # Manual selection – show only if auto fails
-    company_col = st.selectbox("Select the column with company/domain names", columns, key="company_col")
-
-# ------------------------------------------------------------
-# 4. Load data for dropdowns
+# 3. Load data for dropdowns
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
-def load_companies():
-    sql = f"SELECT DISTINCT {company_col} FROM overlaps WHERE {company_col} IS NOT NULL AND {company_col} != ''"
+def load_pulte_subdomains():
+    sql = "SELECT DISTINCT Pulte_subdomain FROM overlaps WHERE Pulte_subdomain IS NOT NULL AND Pulte_subdomain != '' ORDER BY Pulte_subdomain"
     df, _ = run_query(sql)
-    return df[company_col].tolist() if df is not None and not df.empty else []
+    return df['Pulte_subdomain'].tolist() if df is not None and not df.empty else []
 
 @st.cache_data(ttl=600)
 def load_fraud_flags():
     sql = "SELECT DISTINCT Fraud_Risk_Tags FROM overlaps WHERE Fraud_Risk_Tags IS NOT NULL AND Fraud_Risk_Tags != ''"
     df, _ = run_query(sql)
-    return df['Fraud_Risk_Tags'].tolist() if df is not None and not df.empty else []
+    tags = set()
+    if df is not None and not df.empty:
+        for row in df['Fraud_Risk_Tags']:
+            if row:
+                for tag in row.split(', '):
+                    tags.add(tag.strip())
+    return sorted(tags)
 
-companies = load_companies()
+pulte_list = load_pulte_subdomains()
 fraud_flags = load_fraud_flags()
 
-# ------------------------------------------------------------
-# 5. UI: Two pulldown menus
-# ------------------------------------------------------------
-# Menu 1: Company or "Upload JSON"
-menu1_options = ["All Pulte Companies"] + companies + ["Upload c99.nl JSON"]
-selected_menu1 = st.selectbox("Select Company or Upload JSON", menu1_options, index=0)
+# Build first dropdown options: "All Pulte Companies", then all pulte subdomains, then "Upload c99.nl JSON"
+menu1_options = ["All Pulte Companies"] + pulte_list + ["Upload c99.nl JSON"]
 
-# Menu 2: Fraud flags
-menu2_options = ["All"] + fraud_flags if fraud_flags else ["All"]
-selected_fraud = st.selectbox("Fraud Flag", menu2_options, index=0)
+# ------------------------------------------------------------
+# 4. UI: Two pulldown menus
+# ------------------------------------------------------------
+selected_menu1 = st.selectbox("Select hub source", menu1_options, index=0)
+selected_fraud = st.selectbox("Fraud flag", ["All"] + fraud_flags, index=0)
 
 # If "Upload JSON" is chosen, show file uploader
 uploaded_domains = []
 if selected_menu1 == "Upload c99.nl JSON":
-    uploaded_file = st.file_uploader("Upload JSON file with domain list", type=["json"])
+    uploaded_file = st.file_uploader("Upload JSON file with subdomains", type=["json"])
     if uploaded_file is not None:
         try:
             data = json.load(uploaded_file)
             if isinstance(data, list):
                 uploaded_domains = [str(item) for item in data]
             elif isinstance(data, dict):
-                for key in ['domains', 'subdomains', 'data']:
+                for key in ['subdomains', 'domains', 'data', 'results']:
                     if key in data and isinstance(data[key], list):
                         uploaded_domains = [str(item) for item in data[key]]
                         break
@@ -144,36 +122,39 @@ if selected_menu1 == "Upload c99.nl JSON":
             st.error(f"JSON error: {e}")
 
 # ------------------------------------------------------------
-# 6. Submit button – run search
+# 5. Submit button – run search
 # ------------------------------------------------------------
-if st.button("Submit"):
+if st.button("🔍 Search", type="primary"):
     where_clauses = []
     params = []
 
-    # Company filter (only if not "Upload JSON" and not "All")
-    if selected_menu1 != "All Pulte Companies" and selected_menu1 != "Upload c99.nl JSON":
-        where_clauses.append(f"{company_col} = ?")
+    # Hub selection logic
+    if selected_menu1 == "All Pulte Companies":
+        where_clauses.append("Pulte_subdomain IS NOT NULL")
+    elif selected_menu1 == "Upload c99.nl JSON" and uploaded_domains:
+        placeholders = ','.join(['?'] * len(uploaded_domains))
+        where_clauses.append(f"(Pulte_subdomain IN ({placeholders}) OR Overlapping_subdomain IN ({placeholders}))")
+        params.extend(uploaded_domains + uploaded_domains)
+    elif selected_menu1 != "Upload c99.nl JSON":
+        where_clauses.append("Pulte_subdomain = ?")
         params.append(selected_menu1)
 
-    # If we have uploaded domains, add IN clause (overrides company selection? It should intersect)
-    if uploaded_domains:
-        placeholders = ','.join(['?'] * len(uploaded_domains))
-        where_clauses.append(f"{company_col} IN ({placeholders})")
-        params.extend(uploaded_domains)
-
-    # Fraud flag filter
+    # Fraud flag filter (using LIKE to match individual tags)
     if selected_fraud != "All":
-        where_clauses.append("Fraud_Risk_Tags = ?")
-        params.append(selected_fraud)
+        where_clauses.append("Fraud_Risk_Tags LIKE ?")
+        params.append(f'%{selected_fraud}%')
 
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-    query = f"SELECT * FROM overlaps WHERE {where_sql}"
+    query = f"SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags FROM overlaps WHERE {where_sql} LIMIT 1000"
 
-    st.write("### Search Results")
+    st.write("### 📊 Results")
     with st.spinner("Querying..."):
         df_result, err = run_query(query, params)
         if err:
             st.error(f"Query failed:\n{err}")
         else:
-            st.success(f"Found {len(df_result)} rows.")
-            st.dataframe(df_result)
+            if df_result.empty:
+                st.info("No overlaps found.")
+            else:
+                st.success(f"Found {len(df_result)} rows.")
+                st.dataframe(df_result, use_container_width=True)
