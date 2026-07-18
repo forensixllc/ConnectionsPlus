@@ -209,14 +209,13 @@ if st.session_state.get('search_done', False):
             st.info("No overlaps found for the selected filters.")
         else:
             st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
+            st.caption("Click a row to view its subdomains")
             download_button_for(df_apex, "apex_summary.csv", key="dl_apex_summary")
-            render_table_with_buttons(
+            render_selectable_dataframe(
                 df_apex,
                 name_col='Overlapping_Apex',
-                count_col='count',
-                button_label="View",
                 key_prefix="apex",
-                on_click_callback=lambda apex: (
+                on_select_callback=lambda apex: (
                     st.session_state.update({
                         'selected_apex': apex,
                         'show_details': True,
@@ -246,14 +245,13 @@ if st.session_state.get('search_done', False):
                         st.info("No subdomains found for this apex.")
                     else:
                         safe_apex = apex.replace('/', '_').replace(':', '_')
+                        st.caption("Click a row to view full detail rows")
                         download_button_for(df_sub, f"subdomains_{safe_apex}.csv", key="dl_sub_summary")
-                        render_table_with_buttons(
+                        render_selectable_dataframe(
                             df_sub,
                             name_col='Overlapping_subdomain',
-                            count_col='cnt',
-                            button_label="View",
                             key_prefix="sub",
-                            on_click_callback=lambda sub: (
+                            on_select_callback=lambda sub: (
                                 st.session_state.update({
                                     'selected_subdomain': sub,
                                     'show_subdomain_details': True
