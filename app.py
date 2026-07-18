@@ -182,7 +182,7 @@ def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, st
     widget_key = f"{key_prefix}_select_df"
     event = st.dataframe(
         df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
@@ -348,4 +348,4 @@ if st.session_state.get('search_done', False):
                 else:
                     download_button_for(df_detail, f"details_{safe_sub}.csv", key="dl_detail")
 
-                st.dataframe(df_detail, use_container_width=True)
+                st.dataframe(df_detail, width='stretch')
