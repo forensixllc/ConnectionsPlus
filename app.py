@@ -171,23 +171,29 @@ if st.button("🔍 Search", type="primary"):
 # ------------------------------------------------------------
 # 6. Display results (if search has been done)
 # ------------------------------------------------------------
-def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback):
+def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, state_key):
     """Render df as a native st.dataframe (search/download/expand toolbar built in).
     Clicking a row triggers on_select_callback(name) and reruns.
-    Requires streamlit >= 1.35 for on_select support."""
+    Requires streamlit >= 1.35 for on_select support.
+
+    st.dataframe selection is sticky across reruns, so we only fire the
+    callback when the selection is actually new (compared against
+    st.session_state[state_key]) to avoid an infinite rerun loop."""
+    widget_key = f"{key_prefix}_select_df"
     event = st.dataframe(
         df,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        key=f"{key_prefix}_select_df",
+        key=widget_key,
     )
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
         name = df.iloc[selected_rows[0]][name_col]
-        on_select_callback(name)
-        st.rerun()
+        if st.session_state.get(state_key) != name:
+            on_select_callback(name)
+            st.rerun()
 
 if st.session_state.get('search_done', False):
     where_sql = st.session_state['where_sql']
@@ -215,6 +221,7 @@ if st.session_state.get('search_done', False):
                 df_apex,
                 name_col='Overlapping_Apex',
                 key_prefix="apex",
+                state_key="selected_apex",
                 on_select_callback=lambda apex: (
                     st.session_state.update({
                         'selected_apex': apex,
@@ -251,6 +258,7 @@ if st.session_state.get('search_done', False):
                             df_sub,
                             name_col='Overlapping_subdomain',
                             key_prefix="sub",
+                            state_key="selected_subdomain",
                             on_select_callback=lambda sub: (
                                 st.session_state.update({
                                     'selected_subdomain': sub,
@@ -263,6 +271,7 @@ if st.session_state.get('search_done', False):
                         if st.button("← Back to apex summary"):
                             st.session_state['show_details'] = False
                             st.session_state['selected_apex'] = None
+                            st.session_state.pop('apex_select_df', None)
                             st.rerun()
 
                         # --- Level 3: Row details (if a subdomain is selected) ---
@@ -318,5 +327,5 @@ if st.session_state.get('search_done', False):
                             if st.button("← Back to subdomains"):
                                 st.session_state['show_subdomain_details'] = False
                                 st.session_state['selected_subdomain'] = None
+                                st.session_state.pop('sub_select_df', None)
                                 st.rerun()
-
