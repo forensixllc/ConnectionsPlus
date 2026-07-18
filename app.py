@@ -199,134 +199,153 @@ if st.session_state.get('search_done', False):
     where_sql = st.session_state['where_sql']
     params = st.session_state['params']
 
-    # --- Level 1: Apex summary ---
-    apex_query = f"""
-        SELECT Overlapping_Apex, COUNT(*) as count
-        FROM overlaps
-        WHERE {where_sql}
-        GROUP BY Overlapping_Apex
-        ORDER BY count DESC
-    """
-    df_apex, err = run_query(apex_query, params)
-    if err:
-        st.error(f"Error loading summary: {err}")
-    else:
-        if df_apex.empty:
-            st.info("No overlaps found for the selected filters.")
-        else:
-            st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
-            st.caption("Click a row to view its subdomains")
-            download_button_for(df_apex, "apex_summary.csv", key="dl_apex_summary")
-            render_selectable_dataframe(
-                df_apex,
-                name_col='Overlapping_Apex',
-                key_prefix="apex",
-                state_key="selected_apex",
-                on_select_callback=lambda apex: (
-                    st.session_state.update({
-                        'selected_apex': apex,
-                        'show_details': True,
-                        'show_subdomain_details': False,
-                        'selected_subdomain': None
-                    })
+    # Determine which single level to show
+    level = 'apex'
+    if st.session_state.get('show_details') and st.session_state.get('selected_apex'):
+        level = 'subdomain'
+    if st.session_state.get('show_subdomain_details') and st.session_state.get('selected_subdomain'):
+        level = 'detail'
+
+    # --- Breadcrumb ---
+    crumb_cols = st.columns([1, 1, 6])
+    if level in ('subdomain', 'detail'):
+        if crumb_cols[0].button("⬅ Apex list"):
+            st.session_state['show_details'] = False
+            st.session_state['selected_apex'] = None
+            st.session_state['show_subdomain_details'] = False
+            st.session_state['selected_subdomain'] = None
+            st.session_state.pop('apex_select_df', None)
+            st.rerun()
+    if level == 'detail':
+        if crumb_cols[1].button("⬅ Subdomains"):
+            st.session_state['show_subdomain_details'] = False
+            st.session_state['selected_subdomain'] = None
+            st.session_state.pop('sub_select_df', None)
+            st.rerun()
+
+    breadcrumb = "**All Apex Domains**"
+    if level in ('subdomain', 'detail'):
+        breadcrumb += f" › **{st.session_state['selected_apex']}**"
+    if level == 'detail':
+        breadcrumb += f" › **{st.session_state['selected_subdomain']}**"
+    st.markdown(breadcrumb)
+
+    results_box = st.container()
+
+    # ================= Level 1: Apex summary =================
+    if level == 'apex':
+        apex_query = f"""
+            SELECT Overlapping_Apex, COUNT(*) as count
+            FROM overlaps
+            WHERE {where_sql}
+            GROUP BY Overlapping_Apex
+            ORDER BY count DESC
+        """
+        df_apex, err = run_query(apex_query, params)
+        with results_box:
+            if err:
+                st.error(f"Error loading summary: {err}")
+            elif df_apex.empty:
+                st.info("No overlaps found for the selected filters.")
+            else:
+                st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
+                st.caption("Click a row to view its subdomains")
+                download_button_for(df_apex, "apex_summary.csv", key="dl_apex_summary")
+                render_selectable_dataframe(
+                    df_apex,
+                    name_col='Overlapping_Apex',
+                    key_prefix="apex",
+                    state_key="selected_apex",
+                    on_select_callback=lambda apex: (
+                        st.session_state.update({
+                            'selected_apex': apex,
+                            'show_details': True,
+                            'show_subdomain_details': False,
+                            'selected_subdomain': None
+                        })
+                    )
                 )
-            )
 
-            # --- Level 2: Subdomain summary (if an apex is selected) ---
-            if st.session_state.get('show_details') and st.session_state.get('selected_apex'):
-                apex = st.session_state['selected_apex']
-                st.write(f"### 🔍 Subdomains under `{apex}`")
-                sub_query = f"""
-                    SELECT Overlapping_subdomain, COUNT(*) as cnt
-                    FROM overlaps
-                    WHERE {where_sql} AND Overlapping_Apex = ?
-                    GROUP BY Overlapping_subdomain
-                    ORDER BY cnt DESC
-                """
-                params_sub = params + [apex]
-                df_sub, err_sub = run_query(sub_query, params_sub)
-                if err_sub:
-                    st.error(f"Error loading subdomains: {err_sub}")
-                else:
-                    if df_sub.empty:
-                        st.info("No subdomains found for this apex.")
+    # ================= Level 2: Subdomain summary =================
+    elif level == 'subdomain':
+        apex = st.session_state['selected_apex']
+        sub_query = f"""
+            SELECT Overlapping_subdomain, COUNT(*) as cnt
+            FROM overlaps
+            WHERE {where_sql} AND Overlapping_Apex = ?
+            GROUP BY Overlapping_subdomain
+            ORDER BY cnt DESC
+        """
+        params_sub = params + [apex]
+        df_sub, err_sub = run_query(sub_query, params_sub)
+        with results_box:
+            if err_sub:
+                st.error(f"Error loading subdomains: {err_sub}")
+            elif df_sub.empty:
+                st.info("No subdomains found for this apex.")
+            else:
+                st.write(f"### 🔍 Subdomains under `{apex}` ({len(df_sub)} distinct)")
+                st.caption("Click a row to view full detail rows")
+                safe_apex = apex.replace('/', '_').replace(':', '_')
+                download_button_for(df_sub, f"subdomains_{safe_apex}.csv", key="dl_sub_summary")
+                render_selectable_dataframe(
+                    df_sub,
+                    name_col='Overlapping_subdomain',
+                    key_prefix="sub",
+                    state_key="selected_subdomain",
+                    on_select_callback=lambda sub: (
+                        st.session_state.update({
+                            'selected_subdomain': sub,
+                            'show_subdomain_details': True
+                        })
+                    )
+                )
+
+    # ================= Level 3: Row detail =================
+    elif level == 'detail':
+        sub = st.session_state['selected_subdomain']
+
+        count_query = f"""
+            SELECT COUNT(*) as total
+            FROM overlaps
+            WHERE {where_sql} AND Overlapping_subdomain = ?
+        """
+        params_count = params + [sub]
+        df_count, err_count = run_query(count_query, params_count)
+        total_rows = int(df_count['total'].iloc[0]) if df_count is not None and not df_count.empty else 0
+
+        detail_query = f"""
+            SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
+            FROM overlaps
+            WHERE {where_sql} AND Overlapping_subdomain = ?
+            LIMIT 1000
+        """
+        params_detail = params + [sub]
+        df_detail, err_detail = run_query(detail_query, params_detail)
+
+        with results_box:
+            st.write(f"### 📋 Detailed overlaps for `{sub}`")
+            if err_detail:
+                st.error(f"Error loading details: {err_detail}")
+            else:
+                safe_sub = sub.replace('/', '_').replace(':', '_')
+
+                if total_rows > 1000:
+                    st.info(
+                        f"Showing first 1,000 of {total_rows:,} rows for this subdomain. "
+                        f"Download the full CSV below to see everything."
+                    )
+                    full_query = f"""
+                        SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
+                        FROM overlaps
+                        WHERE {where_sql} AND Overlapping_subdomain = ?
+                    """
+                    df_full, err_full = run_query(full_query, params_detail)
+                    if err_full:
+                        st.error(f"Error preparing full export: {err_full}")
                     else:
-                        safe_apex = apex.replace('/', '_').replace(':', '_')
-                        st.caption("Click a row to view full detail rows")
-                        download_button_for(df_sub, f"subdomains_{safe_apex}.csv", key="dl_sub_summary")
-                        render_selectable_dataframe(
-                            df_sub,
-                            name_col='Overlapping_subdomain',
-                            key_prefix="sub",
-                            state_key="selected_subdomain",
-                            on_select_callback=lambda sub: (
-                                st.session_state.update({
-                                    'selected_subdomain': sub,
-                                    'show_subdomain_details': True
-                                })
-                            )
-                        )
+                        download_button_for(df_full, f"details_{safe_sub}_full.csv", key="dl_detail_full")
+                else:
+                    download_button_for(df_detail, f"details_{safe_sub}.csv", key="dl_detail")
 
-                        # Back button to apex summary
-                        if st.button("← Back to apex summary"):
-                            st.session_state['show_details'] = False
-                            st.session_state['selected_apex'] = None
-                            st.session_state.pop('apex_select_df', None)
-                            st.rerun()
-
-                        # --- Level 3: Row details (if a subdomain is selected) ---
-                        if st.session_state.get('show_subdomain_details') and st.session_state.get('selected_subdomain'):
-                            sub = st.session_state['selected_subdomain']
-                            st.write(f"### 📋 Detailed overlaps for `{sub}`")
-
-                            # Get total count first so we know if we're truncating
-                            count_query = f"""
-                                SELECT COUNT(*) as total
-                                FROM overlaps
-                                WHERE {where_sql} AND Overlapping_subdomain = ?
-                            """
-                            params_count = params + [sub]
-                            df_count, err_count = run_query(count_query, params_count)
-                            total_rows = int(df_count['total'].iloc[0]) if df_count is not None and not df_count.empty else 0
-
-                            detail_query = f"""
-                                SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
-                                FROM overlaps
-                                WHERE {where_sql} AND Overlapping_subdomain = ?
-                                LIMIT 1000
-                            """
-                            params_detail = params + [sub]
-                            df_detail, err_detail = run_query(detail_query, params_detail)
-                            if err_detail:
-                                st.error(f"Error loading details: {err_detail}")
-                            else:
-                                safe_sub = sub.replace('/', '_').replace(':', '_')
-
-                                if total_rows > 1000:
-                                    st.info(
-                                        f"Showing first 1,000 of {total_rows:,} rows for this subdomain. "
-                                        f"Download the full CSV below to see everything."
-                                    )
-                                    # Full unbounded query just for the CSV export
-                                    full_query = f"""
-                                        SELECT IP, Pulte_subdomain, Overlapping_subdomain, Fraud_Risk_Tags
-                                        FROM overlaps
-                                        WHERE {where_sql} AND Overlapping_subdomain = ?
-                                    """
-                                    df_full, err_full = run_query(full_query, params_detail)
-                                    if err_full:
-                                        st.error(f"Error preparing full export: {err_full}")
-                                    else:
-                                        download_button_for(df_full, f"details_{safe_sub}_full.csv", key="dl_detail_full")
-                                else:
-                                    download_button_for(df_detail, f"details_{safe_sub}.csv", key="dl_detail")
-
-                                st.dataframe(df_detail, use_container_width=True)
-
-                            # Back to subdomain list
-                            if st.button("← Back to subdomains"):
-                                st.session_state['show_subdomain_details'] = False
-                                st.session_state['selected_subdomain'] = None
-                                st.session_state.pop('sub_select_df', None)
-                                st.rerun()
-
+                st.dataframe(df_detail, use_container_width=True)
