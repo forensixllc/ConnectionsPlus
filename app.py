@@ -171,18 +171,23 @@ if st.button("🔍 Search", type="primary"):
 # ------------------------------------------------------------
 # 6. Display results (if search has been done)
 # ------------------------------------------------------------
-def render_table_with_buttons(df, name_col, count_col, button_label, key_prefix, on_click_callback):
-    """Render a table with a View button per row."""
-    for idx, row in df.iterrows():
-        name = row[name_col]
-        count = row[count_col]
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.write(f"**{name}** — {count} {('overlap' if count==1 else 'overlaps')}")
-        with col2:
-            if st.button(button_label, key=f"{key_prefix}_{name}"):
-                on_click_callback(name)
-                st.rerun()
+def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback):
+    """Render df as a native st.dataframe (search/download/expand toolbar built in).
+    Clicking a row triggers on_select_callback(name) and reruns.
+    Requires streamlit >= 1.35 for on_select support."""
+    event = st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"{key_prefix}_select_df",
+    )
+    selected_rows = event.selection.rows if event and event.selection else []
+    if selected_rows:
+        name = df.iloc[selected_rows[0]][name_col]
+        on_select_callback(name)
+        st.rerun()
 
 if st.session_state.get('search_done', False):
     where_sql = st.session_state['where_sql']
