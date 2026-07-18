@@ -329,3 +329,4 @@ if st.session_state.get('search_done', False):
                                 st.session_state['selected_subdomain'] = None
                                 st.session_state.pop('sub_select_df', None)
                                 st.rerun()
+
