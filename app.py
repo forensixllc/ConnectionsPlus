@@ -319,3 +319,4 @@ if st.session_state.get('search_done', False):
                                 st.session_state['show_subdomain_details'] = False
                                 st.session_state['selected_subdomain'] = None
                                 st.rerun()
+
