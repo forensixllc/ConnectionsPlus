@@ -24,7 +24,7 @@ st.title("🔗 Pulte +")
 st.caption("Search overlaps for Pulte companies or any domain list from a JSON file")
 
 # ------------------------------------------------------------
-# 1. Database download (with spinner, no persistent message)
+# 1. Database download (with spinner)
 # ------------------------------------------------------------
 LOCAL_DB = '/content/connections.db'
 DROPBOX_LINK = "https://www.dropbox.com/scl/fi/sb8hkhj0mcakyavehh7xe/connections.db?rlkey=vn39nyf8v51a0vtj1qorzuf67&st=su0255ne&dl=1"
@@ -53,7 +53,7 @@ if db_path is None:
     st.stop()
 
 # ------------------------------------------------------------
-# 2. Helper: run query with a fresh connection
+# 2. Helper: run query
 # ------------------------------------------------------------
 def run_query(sql, params=None):
     conn = None
@@ -68,7 +68,7 @@ def run_query(sql, params=None):
             conn.close()
 
 # ------------------------------------------------------------
-# 3. Load data for dropdowns (from hubs table)
+# 3. Load dropdown data (cached)
 # ------------------------------------------------------------
 @st.cache_data(ttl=600)
 def load_pulte_subdomains():
@@ -90,16 +90,14 @@ def load_fraud_flags():
 
 pulte_list = load_pulte_subdomains()
 fraud_flags = load_fraud_flags()
-
 menu1_options = ["All Pulte Companies"] + pulte_list + ["Upload c99.nl JSON"]
 
 # ------------------------------------------------------------
-# 4. UI: Two pulldown menus
+# 4. UI Controls
 # ------------------------------------------------------------
 selected_menu1 = st.selectbox("Select hub source", menu1_options, index=0)
 selected_fraud = st.selectbox("Fraud flag", ["All"] + fraud_flags, index=0)
 
-# JSON upload (if selected)
 uploaded_domains = []
 if selected_menu1 == "Upload c99.nl JSON":
     uploaded_file = st.file_uploader("Upload JSON file with subdomains", type=["json"])
@@ -120,10 +118,10 @@ if selected_menu1 == "Upload c99.nl JSON":
             st.error(f"JSON error: {e}")
 
 # ------------------------------------------------------------
-# 5. Search button – three‑level drill‑down
+# 5. Search button – triggers query and stores state
 # ------------------------------------------------------------
 if st.button("🔍 Search", type="primary"):
-    # Build WHERE clause for filters
+    # Build WHERE clause
     where_clauses = []
     params = []
 
@@ -143,11 +141,23 @@ if st.button("🔍 Search", type="primary"):
 
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-    # Clear previous drill‑down state
+    # Save the filter state
+    st.session_state['where_sql'] = where_sql
+    st.session_state['params'] = params
+    st.session_state['search_done'] = True
+    # Clear drill-down state
     st.session_state['show_details'] = False
     st.session_state['selected_apex'] = None
     st.session_state['show_subdomain_details'] = False
     st.session_state['selected_subdomain'] = None
+    st.rerun()
+
+# ------------------------------------------------------------
+# 6. Display results (if search has been done)
+# ------------------------------------------------------------
+if st.session_state.get('search_done', False):
+    where_sql = st.session_state['where_sql']
+    params = st.session_state['params']
 
     # --- Level 1: Apex summary ---
     apex_query = f"""
@@ -165,6 +175,8 @@ if st.button("🔍 Search", type="primary"):
             st.info("No overlaps found for the selected filters.")
         else:
             st.write(f"### 📊 Overlapping Apex Domains ({len(df_apex)} distinct)")
+
+            # Display as a table-like layout with View buttons
             for _, row in df_apex.iterrows():
                 apex = row['Overlapping_Apex']
                 count = row['count']
