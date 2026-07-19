@@ -134,12 +134,27 @@ selected_domain = st.selectbox("Overlapping domain", ["All domains"] + apex_doma
 selected_ip = st.selectbox("IP address", ["All IPs"] + ip_list, index=0)
 
 uploaded_domains = []
+uploaded_ips = []
+uploaded_ip_to_subdomains = {}
+uploaded_label = None
 with st.expander("📤 Or upload a subdomainfinder.c99.nl file"):
     uploaded_file = st.file_uploader("Upload JSON file with subdomains", type=["json"])
     if uploaded_file is not None:
         try:
             data = json.load(uploaded_file)
-            if isinstance(data, list):
+            if isinstance(data, list) and data and isinstance(data[0], dict) and (
+                'subdomain' in data[0] or 'ip' in data[0]
+            ):
+                # c99.nl export format: [{"subdomain": "...", "ip": "...", "cloudflare": "..."}, ...]
+                for item in data:
+                    sub = str(item.get('subdomain', '')).strip()
+                    ip = str(item.get('ip', '')).strip()
+                    if sub:
+                        uploaded_domains.append(sub)
+                    if ip:
+                        uploaded_ips.append(ip)
+                        uploaded_ip_to_subdomains.setdefault(ip, []).append(sub or ip)
+            elif isinstance(data, list):
                 uploaded_domains = [str(item) for item in data]
             elif isinstance(data, dict):
                 for key in ['subdomains', 'domains', 'data', 'results']:
@@ -148,7 +163,14 @@ with st.expander("📤 Or upload a subdomainfinder.c99.nl file"):
                         break
                 if not uploaded_domains:
                     uploaded_domains = [str(v) for v in data.values() if isinstance(v, str)]
-            st.success(f"Loaded {len(uploaded_domains)} domains. This overrides the Pulte company dropdown above.")
+
+            uploaded_ips = sorted(set(uploaded_ips))
+            uploaded_label = uploaded_file.name
+            msg = f"Loaded {len(uploaded_domains)} subdomains"
+            if uploaded_ips:
+                msg += f" across {len(uploaded_ips)} distinct IPs"
+            msg += ". This becomes the new hub and overrides the Pulte company dropdown above — the app will look for overlaps (shared IPs or matching subdomains) between this file and the rest of the database."
+            st.success(msg)
         except Exception as e:
             st.error(f"JSON error: {e}")
 
@@ -162,11 +184,22 @@ if st.button("🔍 Search", type="primary"):
     where_clauses = []
     params = []
 
-    if uploaded_domains:
-        # Uploaded c99.nl list takes precedence over the company dropdown
-        placeholders = ','.join(['?'] * len(uploaded_domains))
-        where_clauses.append(f"(Pulte_subdomain IN ({placeholders}) OR Overlapping_subdomain IN ({placeholders}))")
-        params.extend(uploaded_domains + uploaded_domains)
+    if uploaded_domains or uploaded_ips:
+        # Uploaded file becomes the new hub. Match existing DB rows that
+        # either share an IP with an uploaded subdomain, or that literally
+        # reference one of the uploaded subdomain strings.
+        sub_conditions = []
+        if uploaded_domains:
+            placeholders = ','.join(['?'] * len(uploaded_domains))
+            sub_conditions.append(f"Pulte_subdomain IN ({placeholders})")
+            params.extend(uploaded_domains)
+            sub_conditions.append(f"Overlapping_subdomain IN ({placeholders})")
+            params.extend(uploaded_domains)
+        if uploaded_ips:
+            placeholders = ','.join(['?'] * len(uploaded_ips))
+            sub_conditions.append(f"IP IN ({placeholders})")
+            params.extend(uploaded_ips)
+        where_clauses.append("(" + " OR ".join(sub_conditions) + ")")
     elif selected_company != "All Pulte Companies":
         # Match the exact apex or anything under it, e.g. Centex.com matches
         # both "centex.com" and "kioskk.dev.centex.com"
@@ -199,6 +232,10 @@ if st.button("🔍 Search", type="primary"):
 
     st.session_state['where_sql'] = where_sql
     st.session_state['params'] = params
+    # Snapshot the upload context so drill-downs later can still annotate
+    # results correctly even if the uploader widget state changes.
+    st.session_state['upload_ip_map'] = uploaded_ip_to_subdomains
+    st.session_state['upload_label'] = uploaded_label
     st.session_state['search_done'] = True
     # Clear drill-down state
     st.session_state['selected_apex'] = None
@@ -250,6 +287,21 @@ if st.session_state.get('search_done', False):
     if level == 'detail':
         breadcrumb += f" › **{st.session_state['selected_apex']}**"
     st.markdown(breadcrumb)
+
+    if st.session_state.get('upload_label'):
+        st.caption(f"🔗 New hub: uploaded file `{st.session_state['upload_label']}` — matches are by shared IP or exact subdomain")
+
+    def annotate_with_upload_matches(df):
+        """Add a column showing which uploaded subdomain(s) share this row's IP,
+        when the current search was driven by an uploaded c99.nl file."""
+        ip_map = st.session_state.get('upload_ip_map') or {}
+        if not ip_map or df is None or df.empty:
+            return df
+        df = df.copy()
+        df['Matched_Uploaded_Subdomain'] = df['IP'].apply(
+            lambda ip: ', '.join(sorted(set(ip_map.get(ip, []))))
+        )
+        return df
 
     results_box = st.container()
 
