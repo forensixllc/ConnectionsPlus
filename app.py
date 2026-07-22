@@ -7,9 +7,6 @@ import tempfile
 import os
 import traceback
 
-# ------------------------------------------------------------
-# Custom CSS – Dark Forensic Theme
-# ------------------------------------------------------------
 st.markdown(
     """
     <style>
@@ -25,10 +22,11 @@ st.title("🔗 Enterprise Infrastructure Overlap Portal")
 st.caption("Forensic correlation tool for IP routing, cryptographic SSL certificates, and C99 JSON reconnaissance.")
 
 # ------------------------------------------------------------
-# 1. Database Connection Setup with SQLite Validation
+# 1. Database Connection Setup
 # ------------------------------------------------------------
 LOCAL_DB = 'connections.db'
-DROPBOX_LINK = "https://www.dropbox.com/scl/fi/w9m2pzokl9mmlbgb1op6v/connections.db?rlkey=tzps94ys8y79lh2ri57ct14wq&st=8pcwxmrm&dl=1"
+# REPLACE THIS WITH YOUR NEW DROPBOX LINK FOR THE 4MB FILE
+DROPBOX_LINK = "https://www.dropbox.com/scl/fi/4by6l2v7vgfkp1f91qroj/connections.db?rlkey=562uf1p3inkw1wvjmq2y3uel9&st=9idzx987&dl=1" 
 
 def is_valid_sqlite(filepath):
     try:
@@ -51,21 +49,16 @@ def get_db_path():
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
                 temp_file.close()
-                
                 if is_valid_sqlite(temp_file.name):
                     return temp_file.name
-                else:
-                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database. Please verify your Dropbox link.")
-                    return None
-            else:
-                st.error(f"Failed to download database (HTTP {response.status_code})")
                 return None
-        except Exception as e:
-            st.error(f"Download error: {e}")
+            return None
+        except Exception:
             return None
 
 db_path = get_db_path()
 if db_path is None:
+    st.error("❌ Failed to load valid database. Check Dropbox link.")
     st.stop()
 
 def run_query(sql, params=None):
@@ -80,12 +73,8 @@ def run_query(sql, params=None):
         if conn:
             conn.close()
 
-@st.cache_data
 def to_csv_bytes(df):
     return df.to_csv(index=False).encode('utf-8')
-
-def download_button_for(df, filename, key):
-    st.download_button(label=f"⬇️ Export {filename}", data=to_csv_bytes(df), file_name=filename, mime="text/csv", key=key)
 
 # ------------------------------------------------------------
 # 2. Main UI Controls
@@ -94,30 +83,13 @@ st.subheader("🎯 Primary Inquiry Controls")
 col1, col2, col3 = st.columns([2, 2, 1])
 
 with col1:
-    evidence_type = st.selectbox(
-        "1. Select Overlap Evidence Type",
-        ["IP overlaps (strong)", "SSL overlaps (cryptographic)"],
-        index=0
-    )
-
+    evidence_type = st.selectbox("1. Select Overlap Evidence Type", ["IP overlaps (strong)", "SSL overlaps (cryptographic)"])
 with col2:
-    target_group = st.selectbox(
-        "2. Select Target Enterprise Group",
-        [
-            "Pulte group companies",
-            "Foley group companies",
-            "ICE Mortgage companies",
-            "Apollo Group"
-        ],
-        index=0
-    )
-
+    target_group = st.selectbox("2. Select Target Enterprise Group", ["Pulte group companies", "Foley group companies", "ICE Mortgage companies", "Apollo Group"])
 with col3:
-    # Dynamic threshold replaces the hardcoded 500
-    min_overlaps = st.number_input("3. Min Overlap Threshold", min_value=1, value=1, help="Increase this to filter out smaller overlap results.")
+    min_overlaps = st.number_input("3. Min Overlap Threshold", min_value=1, value=1, help="Filter out small noise.")
 
-uploaded_domains = []
-uploaded_ips = []
+uploaded_domains, uploaded_ips = [], []
 with st.expander("📤 4. Upload JSON file from subdomainfinder.c99.nl (Overrides Group Selection)"):
     uploaded_file = st.file_uploader("Upload JSON export", type=["json"])
     if uploaded_file is not None:
@@ -125,121 +97,105 @@ with st.expander("📤 4. Upload JSON file from subdomainfinder.c99.nl (Override
             data = json.load(uploaded_file)
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 for item in data:
-                    sub = str(item.get('subdomain', '')).strip()
-                    ip = str(item.get('ip', '')).strip()
-                    if sub: uploaded_domains.append(sub)
-                    if ip: uploaded_ips.append(ip)
-            elif isinstance(data, list):
-                uploaded_domains = [str(item) for item in data]
-            uploaded_ips = sorted(set(uploaded_ips))
-            st.success(f"Loaded {len(uploaded_domains)} subdomains across {len(uploaded_ips)} unique IPs.")
+                    if item.get('subdomain'): uploaded_domains.append(str(item['subdomain']).strip())
+                    if item.get('ip'): uploaded_ips.append(str(item['ip']).strip())
+            st.success(f"Loaded {len(uploaded_domains)} subdomains and {len(set(uploaded_ips))} IPs.")
         except Exception as e:
-            st.error(f"JSON parsing error: {e}")
+            st.error(f"JSON error: {e}")
 
-# ------------------------------------------------------------
-# 3. Search Execution Engine
-# ------------------------------------------------------------
 if st.button("🔍 Run Overlap Query", type="primary"):
-    is_json_mode = bool(uploaded_domains or uploaded_ips)
-    
-    st.session_state['evidence_type'] = evidence_type
-    st.session_state['target_group'] = target_group
-    st.session_state['min_overlaps'] = min_overlaps
-    st.session_state['is_json_mode'] = is_json_mode
-    st.session_state['uploaded_domains'] = uploaded_domains
-    st.session_state['uploaded_ips'] = uploaded_ips
-    st.session_state['search_done'] = True
-    st.session_state['selected_apex'] = None
+    st.session_state.update({
+        'join_col': "ip_addresses" if "IP" in evidence_type else "ssl_serial_hex",
+        'target_group': target_group,
+        'min_overlaps': min_overlaps,
+        'is_json_mode': bool(uploaded_domains or uploaded_ips),
+        'uploaded_domains': uploaded_domains,
+        'uploaded_ips': uploaded_ips,
+        'search_done': True,
+        'selected_apex': None
+    })
     st.rerun()
 
-def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, state_key):
-    widget_key = f"{key_prefix}_select_df"
-    event = st.dataframe(df, width='stretch', hide_index=True, on_select="rerun", selection_mode="single-row", key=widget_key)
-    selected_rows = event.selection.rows if event and event.selection else []
-    if selected_rows:
-        name = df.iloc[selected_rows[0]][name_col]
+def render_selectable_dataframe(df, name_col, state_key):
+    event = st.dataframe(df, width='stretch', hide_index=True, on_select="rerun", selection_mode="single-row")
+    if event and event.selection and event.selection.rows:
+        name = df.iloc[event.selection.rows[0]][name_col]
         if st.session_state.get(state_key) != name:
-            on_select_callback(name)
+            st.session_state[state_key] = name
             st.rerun()
 
 # ------------------------------------------------------------
-# 4. Display Results & Drill-Downs
+# 3. Dynamic Engine (Eliminates Intra-Company Overlaps)
 # ------------------------------------------------------------
 if st.session_state.get('search_done', False):
-    evidence_type = st.session_state['evidence_type']
-    target_group = st.session_state['target_group']
-    min_overlaps_val = st.session_state['min_overlaps']
-    is_json_mode = st.session_state['is_json_mode']
-
+    join_col = st.session_state['join_col']
+    target_grp = st.session_state['target_group']
     level = 'detail' if st.session_state.get('selected_apex') else 'apex'
+    
     if level == 'detail' and st.button("⬅ Back to Summary"):
         st.session_state['selected_apex'] = None
         st.rerun()
 
-    where_clauses = ["Overlap_Type = ?"]
-    params = [evidence_type]
-
-    if is_json_mode:
-        sub_conditions = []
+    if st.session_state['is_json_mode']:
+        sub_conditions, params = [], []
         if st.session_state['uploaded_domains']:
-            placeholders = ','.join(['?'] * len(st.session_state['uploaded_domains']))
-            sub_conditions.append(f"Pulte_subdomain IN ({placeholders})")
-            params.extend(st.session_state['uploaded_domains'])
-            sub_conditions.append(f"Overlapping_subdomain IN ({placeholders})")
+            placeholders = ','.join(['?']*len(st.session_state['uploaded_domains']))
+            sub_conditions.append(f"subdomain IN ({placeholders})")
             params.extend(st.session_state['uploaded_domains'])
         if st.session_state['uploaded_ips']:
-            placeholders = ','.join(['?'] * len(st.session_state['uploaded_ips']))
-            sub_conditions.append(f"IP IN ({placeholders})")
+            placeholders = ','.join(['?']*len(st.session_state['uploaded_ips']))
+            sub_conditions.append(f"ip_addresses IN ({placeholders})")
             params.extend(st.session_state['uploaded_ips'])
-        if sub_conditions:
-            where_clauses.append("(" + " OR ".join(sub_conditions) + ")")
-    else:
-        where_clauses.append("Group_Name = ?")
-        params.append(target_group)
-
-    where_sql = " AND ".join(where_clauses)
-
-    if level == 'apex':
-        sql = f"""
-            SELECT Overlapping_Apex, COUNT(*) as Overlap_Count
-            FROM overlaps
-            WHERE {where_sql}
-            GROUP BY Overlapping_Apex
-            HAVING Overlap_Count >= ?
-            ORDER BY Overlap_Count DESC
-        """
-        params.append(min_overlaps_val)
-    else:
-        # Format columns dynamically based on whether IP or SSL search was chosen
-        if "IP" in evidence_type:
-            sql = f"""
-                SELECT IP, SSL_Serial, Pulte_subdomain AS Target_Subdomain, Overlapping_subdomain
-                FROM overlaps
-                WHERE {where_sql} AND Overlapping_Apex = ?
-                LIMIT 1000
-            """
+            
+        base_where = "(" + " OR ".join(sub_conditions) + ")"
+        
+        if level == 'apex':
+            sql = f"SELECT apex_domain AS Overlapping_Apex, COUNT(*) as Overlap_Count FROM nodes WHERE {base_where} GROUP BY apex_domain HAVING Overlap_Count >= ? ORDER BY Overlap_Count DESC"
+            params.append(st.session_state['min_overlaps'])
         else:
+            sql = f"SELECT ip_addresses AS IP, ssl_serial_hex AS SSL_Serial, 'JSON Upload' AS Target_Subdomain, subdomain AS Overlapping_subdomain FROM nodes WHERE {base_where} AND apex_domain = ? LIMIT 1000"
+            params.append(st.session_state['selected_apex'])
+
+    else:
+        # Strict rule: Target group matches anything EXCEPT its own group
+        base_where = f"""
+            n1.Group_Name = ? 
+            AND n2.Group_Name != ? 
+            AND n1.{join_col} IS NOT NULL 
+            AND n1.{join_col} NOT IN ('Unknown', 'No Certificate / Timeout', '', 'nan', 'none')
+        """
+        params = [target_grp, target_grp]
+
+        if level == 'apex':
             sql = f"""
-                SELECT SSL_Serial, IP, Pulte_subdomain AS Target_Subdomain, Overlapping_subdomain
-                FROM overlaps
-                WHERE {where_sql} AND Overlapping_Apex = ?
-                LIMIT 1000
+                SELECT n2.apex_domain AS Overlapping_Apex, COUNT(*) as Overlap_Count
+                FROM nodes n1 JOIN nodes n2 ON n1.{join_col} = n2.{join_col}
+                WHERE {base_where}
+                GROUP BY n2.apex_domain HAVING Overlap_Count >= ? ORDER BY Overlap_Count DESC
             """
-        params.append(st.session_state['selected_apex'])
+            params.append(st.session_state['min_overlaps'])
+        else:
+            # Proper column order based on search type
+            col_1 = "n1.ip_addresses AS IP, n1.ssl_serial_hex AS SSL_Serial" if join_col == "ip_addresses" else "n1.ssl_serial_hex AS SSL_Serial, n1.ip_addresses AS IP"
+            sql = f"""
+                SELECT {col_1}, n1.subdomain AS Target_Subdomain, n2.subdomain AS Overlapping_subdomain
+                FROM nodes n1 JOIN nodes n2 ON n1.{join_col} = n2.{join_col}
+                WHERE {base_where} AND n2.apex_domain = ? LIMIT 1000
+            """
+            params.append(st.session_state['selected_apex'])
 
     df_res, err = run_query(sql, params)
     
     if err:
-        st.error(f"Query execution error: {err}")
+        st.error(f"Error: {err}")
     elif df_res is None or df_res.empty:
-        st.info(f"No overlaps discovered with at least {min_overlaps_val} results matching the selected criteria.")
+        st.info("No external overlaps discovered matching the criteria.")
     else:
         if level == 'apex':
-            st.write(f"### 📊 Apex Overlap Summary ({len(df_res):,} entities found)")
-            st.caption("Click any row below to view detailed subdomain correlations.")
-            download_button_for(df_res, "apex_summary.csv", "dl_apex")
-            render_selectable_dataframe(df_res, 'Overlapping_Apex', 'apex', lambda x: st.session_state.update({'selected_apex': x}), 'selected_apex')
+            st.write(f"### 📊 External Apex Overlaps ({len(df_res):,} unique entities)")
+            st.download_button("⬇️ Export Summary", to_csv_bytes(df_res), "apex_summary.csv", "text/csv")
+            render_selectable_dataframe(df_res, 'Overlapping_Apex', 'selected_apex')
         else:
-            st.write(f"### 📋 Detailed Overlap Entries for `{st.session_state['selected_apex']}`")
-            download_button_for(df_res, f"details_{st.session_state['selected_apex']}.csv", "dl_detail")
+            st.write(f"### 📋 Detailed Overlaps for `{st.session_state['selected_apex']}`")
+            st.download_button("⬇️ Export Details", to_csv_bytes(df_res), f"details_{st.session_state['selected_apex']}.csv", "text/csv")
             st.dataframe(df_res, width='stretch')
