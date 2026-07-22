@@ -14,7 +14,7 @@ st.markdown(
     """
     <style>
     .stApp { background-color: #0b0e14; color: #e6edf3; }
-    .stSelectbox, .stButton, .stFileUploader { color: white; }
+    .stSelectbox, .stButton, .stFileUploader, .stNumberInput { color: white; }
     .dataframe { color: #e6edf3 !important; }
     </style>
     """,
@@ -28,10 +28,9 @@ st.caption("Forensic correlation tool for IP routing, cryptographic SSL certific
 # 1. Database Connection Setup with SQLite Validation
 # ------------------------------------------------------------
 LOCAL_DB = 'connections.db'
-DROPBOX_LINK = "https://www.dropbox.com/scl/fi/w9m2pzokl9mmlbgb1op6v/connections.db?rlkey=ot4fkl7ha577fchvfhfebi3zc&st=ilqem04y&dl=1"
+DROPBOX_LINK = "https://www.dropbox.com/scl/fi/w9m2pzokl9mmlbgb1op6v/connections.db?rlkey=tzps94ys8y79lh2ri57ct14wq&st=8pcwxmrm&dl=1"
 
 def is_valid_sqlite(filepath):
-    """Check if file starts with the SQLite binary header bytes."""
     try:
         with open(filepath, 'rb') as f:
             header = f.read(100)
@@ -56,7 +55,7 @@ def get_db_path():
                 if is_valid_sqlite(temp_file.name):
                     return temp_file.name
                 else:
-                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database. Please verify your Dropbox sharing permissions.")
+                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database. Please verify your Dropbox link.")
                     return None
             else:
                 st.error(f"Failed to download database (HTTP {response.status_code})")
@@ -92,7 +91,7 @@ def download_button_for(df, filename, key):
 # 2. Main UI Controls
 # ------------------------------------------------------------
 st.subheader("🎯 Primary Inquiry Controls")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns([2, 2, 1])
 
 with col1:
     evidence_type = st.selectbox(
@@ -113,9 +112,13 @@ with col2:
         index=0
     )
 
+with col3:
+    # Dynamic threshold replaces the hardcoded 500
+    min_overlaps = st.number_input("3. Min Overlap Threshold", min_value=1, value=1, help="Increase this to filter out smaller overlap results.")
+
 uploaded_domains = []
 uploaded_ips = []
-with st.expander("📤 3. Upload JSON file from subdomainfinder.c99.nl (Overrides Group Selection)"):
+with st.expander("📤 4. Upload JSON file from subdomainfinder.c99.nl (Overrides Group Selection)"):
     uploaded_file = st.file_uploader("Upload JSON export", type=["json"])
     if uploaded_file is not None:
         try:
@@ -141,6 +144,7 @@ if st.button("🔍 Run Overlap Query", type="primary"):
     
     st.session_state['evidence_type'] = evidence_type
     st.session_state['target_group'] = target_group
+    st.session_state['min_overlaps'] = min_overlaps
     st.session_state['is_json_mode'] = is_json_mode
     st.session_state['uploaded_domains'] = uploaded_domains
     st.session_state['uploaded_ips'] = uploaded_ips
@@ -159,11 +163,12 @@ def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, st
             st.rerun()
 
 # ------------------------------------------------------------
-# 4. Display Results & Drill-Downs (Threshold > 500 for Folders)
+# 4. Display Results & Drill-Downs
 # ------------------------------------------------------------
 if st.session_state.get('search_done', False):
     evidence_type = st.session_state['evidence_type']
     target_group = st.session_state['target_group']
+    min_overlaps_val = st.session_state['min_overlaps']
     is_json_mode = st.session_state['is_json_mode']
 
     level = 'detail' if st.session_state.get('selected_apex') else 'apex'
@@ -195,15 +200,15 @@ if st.session_state.get('search_done', False):
     where_sql = " AND ".join(where_clauses)
 
     if level == 'apex':
-        # Only show domains with > 500 results in the folder summary view
         sql = f"""
             SELECT Overlapping_Apex, COUNT(*) as Overlap_Count
             FROM overlaps
             WHERE {where_sql}
             GROUP BY Overlapping_Apex
-            HAVING Overlap_Count > 500
+            HAVING Overlap_Count >= ?
             ORDER BY Overlap_Count DESC
         """
+        params.append(min_overlaps_val)
     else:
         # Format columns dynamically based on whether IP or SSL search was chosen
         if "IP" in evidence_type:
@@ -227,12 +232,12 @@ if st.session_state.get('search_done', False):
     if err:
         st.error(f"Query execution error: {err}")
     elif df_res is None or df_res.empty:
-        st.info("No overlaps discovered exceeding 500 results matching the selected criteria.")
+        st.info(f"No overlaps discovered with at least {min_overlaps_val} results matching the selected criteria.")
     else:
         if level == 'apex':
-            st.write(f"### 📊 High-Volume Apex Overlaps (> 500 results) ({len(df_res):,} entities)")
+            st.write(f"### 📊 Apex Overlap Summary ({len(df_res):,} entities found)")
             st.caption("Click any row below to view detailed subdomain correlations.")
-            download_button_for(df_res, "apex_summary_over_500.csv", "dl_apex")
+            download_button_for(df_res, "apex_summary.csv", "dl_apex")
             render_selectable_dataframe(df_res, 'Overlapping_Apex', 'apex', lambda x: st.session_state.update({'selected_apex': x}), 'selected_apex')
         else:
             st.write(f"### 📋 Detailed Overlap Entries for `{st.session_state['selected_apex']}`")
