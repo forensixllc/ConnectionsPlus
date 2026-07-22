@@ -56,7 +56,7 @@ def get_db_path():
                 if is_valid_sqlite(temp_file.name):
                     return temp_file.name
                 else:
-                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database (it may be an HTML error/redirect page). Please verify your Dropbox sharing permissions.")
+                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database. Please verify your Dropbox sharing permissions.")
                     return None
             else:
                 st.error(f"Failed to download database (HTTP {response.status_code})")
@@ -89,7 +89,7 @@ def download_button_for(df, filename, key):
     st.download_button(label=f"⬇️ Export {filename}", data=to_csv_bytes(df), file_name=filename, mime="text/csv", key=key)
 
 # ------------------------------------------------------------
-# 2. Main UI Controls (The 3 Core Lookup Methods)
+# 2. Main UI Controls
 # ------------------------------------------------------------
 st.subheader("🎯 Primary Inquiry Controls")
 col1, col2 = st.columns(2)
@@ -133,8 +133,6 @@ with st.expander("📤 3. Upload JSON file from subdomainfinder.c99.nl (Override
         except Exception as e:
             st.error(f"JSON parsing error: {e}")
 
-search_text = st.text_input("🔎 Optional Keyword Search", "", placeholder="e.g. staging, dev, portal")
-
 # ------------------------------------------------------------
 # 3. Search Execution Engine
 # ------------------------------------------------------------
@@ -146,7 +144,6 @@ if st.button("🔍 Run Overlap Query", type="primary"):
     st.session_state['is_json_mode'] = is_json_mode
     st.session_state['uploaded_domains'] = uploaded_domains
     st.session_state['uploaded_ips'] = uploaded_ips
-    st.session_state['search_text'] = search_text
     st.session_state['search_done'] = True
     st.session_state['selected_apex'] = None
     st.rerun()
@@ -162,20 +159,18 @@ def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, st
             st.rerun()
 
 # ------------------------------------------------------------
-# 4. Display Results & Drill-Downs
+# 4. Display Results & Drill-Downs (Threshold > 500 for Folders)
 # ------------------------------------------------------------
 if st.session_state.get('search_done', False):
     evidence_type = st.session_state['evidence_type']
     target_group = st.session_state['target_group']
     is_json_mode = st.session_state['is_json_mode']
-    search_txt = st.session_state['search_text'].strip()
 
     level = 'detail' if st.session_state.get('selected_apex') else 'apex'
     if level == 'detail' and st.button("⬅ Back to Summary"):
         st.session_state['selected_apex'] = None
         st.rerun()
 
-    # --- SQL Query Construction matching table 'overlaps' ---
     where_clauses = ["Overlap_Type = ?"]
     params = [evidence_type]
 
@@ -196,46 +191,48 @@ if st.session_state.get('search_done', False):
     else:
         where_clauses.append("Group_Name = ?")
         params.append(target_group)
-        
-        # Exclude same-apex / self overlaps dynamically
-        apex_exclude = "%apollo.com" if "Apollo" in target_group else ("%pulte.com" if "Pulte" in target_group else ("%fnf.com" if "Foley" in target_group else "%ice.com"))
-        where_clauses.append("Overlapping_Apex NOT LIKE ?")
-        params.append(apex_exclude)
-
-    if search_txt:
-        where_clauses.append("(LOWER(Pulte_subdomain) LIKE LOWER(?) OR LOWER(Overlapping_subdomain) LIKE LOWER(?) OR LOWER(Overlapping_Apex) LIKE LOWER(?))")
-        params.extend([f"%{search_txt}%", f"%{search_txt}%", f"%{search_txt}%"])
 
     where_sql = " AND ".join(where_clauses)
 
     if level == 'apex':
+        # Only show domains with > 500 results in the folder summary view
         sql = f"""
             SELECT Overlapping_Apex, COUNT(*) as Overlap_Count
             FROM overlaps
             WHERE {where_sql}
             GROUP BY Overlapping_Apex
+            HAVING Overlap_Count > 500
             ORDER BY Overlap_Count DESC
         """
     else:
-        sql = f"""
-            SELECT IP, SSL_Serial, Pulte_subdomain AS Target_Subdomain, Overlapping_subdomain
-            FROM overlaps
-            WHERE {where_sql} AND Overlapping_Apex = ?
-            LIMIT 1000
-        """
+        # Format columns dynamically based on whether IP or SSL search was chosen
+        if "IP" in evidence_type:
+            sql = f"""
+                SELECT IP, SSL_Serial, Pulte_subdomain AS Target_Subdomain, Overlapping_subdomain
+                FROM overlaps
+                WHERE {where_sql} AND Overlapping_Apex = ?
+                LIMIT 1000
+            """
+        else:
+            sql = f"""
+                SELECT SSL_Serial, IP, Pulte_subdomain AS Target_Subdomain, Overlapping_subdomain
+                FROM overlaps
+                WHERE {where_sql} AND Overlapping_Apex = ?
+                LIMIT 1000
+            """
         params.append(st.session_state['selected_apex'])
 
-    # --- Render Streamlit Dataframe Output ---
     df_res, err = run_query(sql, params)
     
     if err:
         st.error(f"Query execution error: {err}")
     elif df_res is None or df_res.empty:
-        st.info("No overlaps discovered matching the selected criteria.")
+        st.info("No overlaps discovered exceeding 500 results matching the selected criteria.")
     else:
         if level == 'apex':
-            st.write(f"### 📊 Discovered Apex Overlaps ({len(df_res):,} unique entities)")
-            download_button_for(df_res, "apex_summary.csv", "dl_apex")
+            st.write(f"### 📊 High-Volume Apex Overlaps (> 500 results) ({len(df_res):,} entities)")
+            st.caption("Click any row below to view detailed subdomain correlations.")
+            download_button_for(df_res, "apex_summary_over_500.csv", "dl_apex")
             render_selectable_dataframe(df_res, 'Overlapping_Apex', 'apex', lambda x: st.session_state.update({'selected_apex': x}), 'selected_apex')
         else:
             st.write(f"### 📋 Detailed Overlap Entries for `{st.session_state['selected_apex']}`")
