@@ -8,7 +8,7 @@ import os
 import traceback
 
 # ------------------------------------------------------------
-# Custom CSS
+# Custom CSS – Dark Forensic Theme
 # ------------------------------------------------------------
 st.markdown(
     """
@@ -25,17 +25,26 @@ st.title("🔗 Enterprise Infrastructure Overlap Portal")
 st.caption("Forensic correlation tool for IP routing, cryptographic SSL certificates, and C99 JSON reconnaissance.")
 
 # ------------------------------------------------------------
-# 1. Database Connection Setup
+# 1. Database Connection Setup with SQLite Validation
 # ------------------------------------------------------------
 LOCAL_DB = 'connections.db'
-# Place your new ~4MB dropbox link here
-DROPBOX_LINK = "https://www.dropbox.com/scl/fi/22x8qcw1iccd8eqa9wfjl/connections.db?rlkey=pxvj6ls63h066apfwlah3z1x5&st=iw8w9pyo&dl=1" 
+DROPBOX_LINK = "https://www.dropbox.com/scl/fi/79zid61a929pyz11pfif7/connections.db?rlkey=rlhcyfh8mafwq7x2aufaullll&st=tk0ul2pc&dl=1"
+
+def is_valid_sqlite(filepath):
+    """Check if file starts with the SQLite binary header bytes."""
+    try:
+        with open(filepath, 'rb') as f:
+            header = f.read(100)
+            return header.startswith(b'SQLite format 3')
+    except Exception:
+        return False
 
 @st.cache_resource(ttl=3600)
 def get_db_path():
-    if os.path.exists(LOCAL_DB):
+    if os.path.exists(LOCAL_DB) and is_valid_sqlite(LOCAL_DB):
         return LOCAL_DB
-    with st.spinner("📥 Downloading database..."):
+        
+    with st.spinner("📥 Downloading optimized database from Dropbox..."):
         try:
             response = requests.get(DROPBOX_LINK, stream=True)
             if response.status_code == 200:
@@ -43,8 +52,15 @@ def get_db_path():
                 for chunk in response.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
                 temp_file.close()
-                return temp_file.name
-            return None
+                
+                if is_valid_sqlite(temp_file.name):
+                    return temp_file.name
+                else:
+                    st.error("❌ The downloaded file from Dropbox is not a valid SQLite database (it may be an HTML error/redirect page). Please verify your Dropbox sharing permissions.")
+                    return None
+            else:
+                st.error(f"Failed to download database (HTTP {response.status_code})")
+                return None
         except Exception as e:
             st.error(f"Download error: {e}")
             return None
@@ -73,7 +89,7 @@ def download_button_for(df, filename, key):
     st.download_button(label=f"⬇️ Export {filename}", data=to_csv_bytes(df), file_name=filename, mime="text/csv", key=key)
 
 # ------------------------------------------------------------
-# 3. Main UI Controls
+# 2. Main UI Controls
 # ------------------------------------------------------------
 st.subheader("🎯 Primary Inquiry Controls")
 col1, col2 = st.columns(2)
@@ -107,13 +123,12 @@ with st.expander("📤 3. Upload JSON file from subdomainfinder.c99.nl (Override
 search_text = st.text_input("🔎 Optional Keyword Search", "", placeholder="e.g. staging, dev, portal")
 
 # ------------------------------------------------------------
-# 4. Search Execution Engine (Dynamic SQL)
+# 3. Search Execution Engine (Dynamic SQL Joins)
 # ------------------------------------------------------------
 if st.button("🔍 Run Overlap Query", type="primary"):
     join_col = "ip_addresses" if "IP" in evidence_type else "ssl_serial_hex"
     is_json_mode = bool(uploaded_domains or uploaded_ips)
     
-    # Store query states
     st.session_state['join_col'] = join_col
     st.session_state['target_group'] = target_group
     st.session_state['is_json_mode'] = is_json_mode
@@ -135,7 +150,7 @@ def render_selectable_dataframe(df, name_col, key_prefix, on_select_callback, st
             st.rerun()
 
 # ------------------------------------------------------------
-# 5. Display Results
+# 4. Display Results & Drill-Downs
 # ------------------------------------------------------------
 if st.session_state.get('search_done', False):
     join_col = st.session_state['join_col']
@@ -148,9 +163,8 @@ if st.session_state.get('search_done', False):
         st.session_state['selected_apex'] = None
         st.rerun()
 
-    # --- SQL Query Builders ---
+    # --- SQL Query Construction ---
     if is_json_mode:
-        # JSON Mode logic: Find global nodes matching uploaded IPs or subdomains
         sub_conditions = []
         params = []
         if st.session_state['uploaded_domains']:
@@ -174,7 +188,6 @@ if st.session_state.get('search_done', False):
             params.append(st.session_state['selected_apex'])
 
     else:
-        # Standard Mode logic: Cross-join nodes internally based on the Group
         base_where = f"""
             n1.Group_Name = ? 
             AND n1.subdomain != n2.subdomain 
@@ -201,7 +214,7 @@ if st.session_state.get('search_done', False):
             """
             params.append(st.session_state['selected_apex'])
 
-    # --- Render Results ---
+    # --- Render Streamlit Dataframe Output ---
     df_res, err = run_query(sql, params)
     
     if err:
